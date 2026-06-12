@@ -1,0 +1,116 @@
+{
+  "version": 1,
+  "description": "vector_meme tag schema. 用于统一标签含义、提示注入、人工标注和自动分类校准。",
+  "tags": {
+    "angry": {
+      "meaning": "生气、不满、炸毛、强烈吐槽",
+      "visual_features": ["皱眉", "怒视", "红脸或火气", "拍桌/指责姿态"],
+      "exclude": ["普通嫌弃", "轻微吐槽", "哭泣"]
+    },
+    "baka": {
+      "meaning": "笨蛋、轻微嫌弃、吐槽对方犯蠢",
+      "visual_features": ["半月眼", "无语表情", "指责或吐槽姿态"],
+      "exclude": ["真实愤怒", "害羞", "哭泣"]
+    },
+    "color": {
+      "meaning": "涩涩、颜色、暧昧或成人向暗示",
+      "visual_features": ["暧昧姿态", "脸红", "诱惑构图"],
+      "exclude": ["普通害羞", "单纯开心"]
+    },
+    "confused": {
+      "meaning": "疑惑、困惑、没听懂、脑袋空空",
+      "visual_features": ["歪头", "问号感", "呆滞", "困惑眼神"],
+      "exclude": ["震惊", "思考", "悲伤"]
+    },
+    "cpu": {
+      "meaning": "CPU 过载、脑袋烧了、思考宕机",
+      "visual_features": ["冒烟", "大脑过载", "呆住", "崩溃感"],
+      "exclude": ["普通困惑", "工作状态"]
+    },
+    "cry": {
+      "meaning": "哭泣、委屈、破防、眼泪明显",
+      "visual_features": ["眼泪", "哭脸", "抽泣", "委屈姿态"],
+      "exclude": ["轻微难过", "撒娇害羞"]
+    },
+    "fool": {
+      "meaning": "傻眼、搞怪、笨拙或自嘲",
+      "visual_features": ["滑稽", "呆萌", "夸张表情"],
+      "exclude": ["明确骂人", "愤怒"]
+    },
+    "givemoney": {
+      "meaning": "要钱、打钱、交易、求投喂",
+      "visual_features": ["钱", "伸手", "付款暗示", "求打赏"],
+      "exclude": ["普通喜欢", "感谢"]
+    },
+    "happy": {
+      "meaning": "开心、高兴、愉快、轻松正反馈",
+      "visual_features": ["笑脸", "明亮表情", "活泼动作"],
+      "exclude": ["恋爱心动", "惊讶", "得意嘲讽"]
+    },
+    "heart": {
+      "meaning": "爱心、心动、喜欢、亲密正反馈",
+      "visual_features": ["爱心", "心形符号", "甜蜜氛围"],
+      "exclude": ["普通开心", "点赞"]
+    },
+    "like": {
+      "meaning": "赞同、点赞、认可、干得好",
+      "visual_features": ["点赞手势", "肯定表情", "鼓励姿态"],
+      "exclude": ["心动", "普通开心"]
+    },
+    "meow": {
+      "meaning": "猫猫、喵、卖萌、轻微撒娇",
+      "visual_features": ["猫耳", "猫爪", "喵叫", "猫化姿态"],
+      "exclude": ["普通害羞", "强烈亲密"]
+    },
+    "morning": {
+      "meaning": "早安、起床、清晨问候",
+      "visual_features": ["早晨", "起床", "问候文字", "睡醒"],
+      "exclude": ["睡觉中", "晚安"]
+    },
+    "reply": {
+      "meaning": "回复、收到、回应对方消息",
+      "visual_features": ["回话", "应答", "收到提示"],
+      "exclude": ["单纯看见", "点赞"]
+    },
+    "sad": {
+      "meaning": "难过、低落、失落，但不一定流泪",
+      "visual_features": ["低头", "沮丧", "暗淡表情"],
+      "exclude": ["明显哭泣", "生气"]
+    },
+    "see": {
+      "meaning": "看、观察、偷窥、盯着",
+      "visual_features": ["盯", "探头", "看屏幕", "观察姿态"],
+      "exclude": ["震惊", "疑惑"]
+    },
+    "shy": {
+      "meaning": "害羞、脸红、不好意思、轻微心动",
+      "visual_features": ["脸红", "躲闪视线", "扭捏", "不好意思"],
+      "exclude": ["成人向暧昧", "哭泣", "普通开心"]
+    },
+    "sigh": {
+      "meaning": "叹气、无奈、疲惫、算了",
+      "visual_features": ["叹气", "扶额", "疲惫眼神", "无奈动作"],
+      "exclude": ["生气", "悲伤哭泣"]
+    },
+    "sleep": {
+      "meaning": "睡觉、困了、晚安、休息",
+      "visual_features": ["睡姿", "闭眼", "被窝", "困倦"],
+      "exclude": ["早安", "昏迷崩溃"]
+    },
+    "surprised": {
+      "meaning": "惊讶、震惊、吓到、意外",
+      "visual_features": ["瞪大眼", "张嘴", "惊吓姿态", "强烈反应"],
+      "exclude": ["普通疑惑", "开心"]
+    },
+    "think": {
+      "meaning": "思考、推理、琢磨、分析",
+      "visual_features": ["托腮", "沉思", "思考姿态"],
+      "exclude": ["CPU 过载", "疑惑"]
+    },
+    "work": {
+      "meaning": "工作、忙碌、加班、处理任务",
+      "visual_features": ["电脑", "办公", "忙碌", "工作场景"],
+      "exclude": ["CPU 崩溃", "睡觉"]
+    }
+  }
+}

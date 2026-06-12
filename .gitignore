@@ -1,0 +1,45 @@
+# Python bytecode / caches
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+
+# Local runtime data
+.cache/
+.codegraph/
+*.log
+*.tmp
+*.bak
+*.old
+
+# AstrBot/vector_meme generated data
+/data/
+data/
+*.db
+*.sqlite
+*.sqlite3
+*.faiss
+
+# Local meme library and model weights
+# These can be large and/or private. Use README instructions to copy/configure them locally.
+/memes/
+/models/
+*.bin
+*.pt
+*.pth
+*.safetensors
+
+# OS/editor files
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+
+# Local env
+.env
+.venv/
+venv/

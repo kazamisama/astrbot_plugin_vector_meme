@@ -1,0 +1,10 @@
+# vector_meme 依赖
+
+# 核心
+numpy>=1.24
+Pillow>=10.0
+faiss-cpu>=1.7.4
+
+# OpenCLIP 后端
+torch>=2.0
+open_clip_torch>=2.20

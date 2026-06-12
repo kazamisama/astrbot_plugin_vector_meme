@@ -1,0 +1,32 @@
+name: vector_meme
+desc: 基于向量检索的 AstrBot 智能表情包插件。LLM 输出 %%tag%% 情绪占位符，插件结合 CLIP/OpenCLIP 向量相似度、tag 加权、反重复和随机采样选择具体图片。可独立运行，不依赖 meme_manager。
+help: |
+  智能表情包 vector_meme
+
+  基础命令：
+    /vm 状态                  - 查看索引状态
+    /vm 预热                  - 预加载 embedder，检查模型可用性
+    /vm 索引 [目录]           - 扫描目录并增量建立索引
+    /vm 重建                  - 清空并重建整个索引
+    /vm 列表 [标签]           - 列出指定标签下的表情或整体统计
+    /vm 标签                  - 列出所有已注册标签
+    /vm 搜索 <文本> [标签]    - 用文本搜索最匹配的表情
+    /vm 删除 <id>             - 从索引中移除某条
+
+  诊断与维护：
+    /vm 解释 <文本> [标签]    - 查看选图原因和打分细节
+    /vm 最近使用 [数量]       - 查看最近发送过的表情
+    /vm 诊断                  - 检查 DB / FAISS / 文件系统一致性
+    /vm 修复                  - 清理缺失文件记录、补注册 tag、刷新 prompt
+
+  分类与治理：
+    /vm 自动分类 <id> [apply] - 基于 prototype + KNN 预测标签；加 apply 才写入
+    /vm 重标注 <id> <新tag>   - 手动修改数据库主 tag，不移动文件
+    /vm 评测 <eval.json>      - 跑小型分类评测集
+    /vm 标签规范              - 查看 tag_schema.json 标签说明
+
+  LLM 集成：
+    在回复中输出 %%happy%% 这类占位符，插件会移除占位符并追加匹配图片。
+    默认不使用 &&tag&&，避免和 meme_manager 冲突。
+version: 0.2.0
+author: chiriu & 橘雪莉
