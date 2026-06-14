@@ -110,6 +110,8 @@ class OpenCLIPEmbedder(BaseEmbedder):
         device: str = "cpu",
         cache_dir: str | None = None,
     ):
+        # 实例级锁：避免不同实例之间互相阻塞（原来用类属性，多实例会共享一把锁）
+        self._lock = threading.Lock()
         try:
             import open_clip  # type: ignore
         except ImportError as e:
@@ -165,8 +167,6 @@ class OpenCLIPEmbedder(BaseEmbedder):
     @property
     def dim(self) -> int:
         return self._dim
-
-    _lock = threading.Lock()
 
     def _no_grad(self):
         import torch

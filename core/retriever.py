@@ -103,6 +103,8 @@ class MemeRetriever:
         self.anti_repeat_window = max(int(anti_repeat_window), 0)
         self.candidate_pool_size = max(int(candidate_pool_size), 1)
         self.random_jitter = max(float(random_jitter), 0.0)
+        # 默认开启加权采样；可通过 pick*() 参数显式覆盖
+        self._stochastic_default = True
 
     def _candidate_vector_ids(self, tag: str | None) -> list[tuple[int, int]]:
         """返回 [(vector_id, meme_id)]，自动过滤越界或无效 vector_id。"""
@@ -206,26 +208,43 @@ class MemeRetriever:
 
         vec_ids = np.array([c[0] for c in candidates], dtype=np.int64)
         meme_ids = [c[1] for c in candidates]
+        vid_to_mid = {int(v): m for v, m in zip(vec_ids.tolist(), meme_ids)}
 
+        # 用 IDSelectorBatch 直接在主索引上做"限定候选集"的 top-k 检索，
+        # 避免 reconstruct_n(全量) + IndexFlatIP 重建，把检索从 O(N) 降到 O(K)。
         import faiss
-        sub_index = faiss.IndexFlatIP(self.db.dim)
-        all_vecs = self.db._index.reconstruct_n(0, self.db.index_size)  # noqa: SLF001
-        sub_vecs = all_vecs[vec_ids]
-        sub_index.add(sub_vecs)
-
+        sel = faiss.IDSelectorBatch(vec_ids)
+        params = faiss.SearchParameters()
+        params.sel = sel
         q = qvec.reshape(1, -1).astype("float32")
         faiss.normalize_L2(q)
         search_k = min(max(int(topk), self.candidate_pool_size), len(candidates))
-        sims, positions = sub_index.search(q, search_k)
+        sims, found_vids = self.db._index.search(q, search_k, params=params)  # noqa: SLF001
         sims = sims[0]
-        positions = positions[0]
+        found_vids = found_vids[0]
 
-        meme_rows = {row["id"]: row for row in self.db.list_memes(limit=10_000_000)}
+        # 把候选 meme 行映射预加载一次，避免在热路径里每次都查全表
+        candidate_mid_set = set(meme_ids)
+        meme_rows: dict[int, dict] = {}
+        if candidate_mid_set:
+            # 用 in-memory 过滤代替 SQL 重新扫表
+            with self.db._conn() as c:  # noqa: SLF001
+                placeholders = ",".join("?" * len(candidate_mid_set))
+                rows = c.execute(
+                    f"SELECT id, file_path, tag, usage_count, last_used_at, description "
+                    f"FROM memes WHERE id IN ({placeholders})",
+                    list(candidate_mid_set),
+                ).fetchall()
+                for r in rows:
+                    meme_rows[int(r["id"])] = dict(r)
+
         hits: list[MemeHit] = []
-        for pos, sim in zip(positions, sims):
-            if pos < 0 or pos >= len(meme_ids):
+        for vid, sim in zip(found_vids, sims):
+            if int(vid) < 0:
                 continue
-            mid = meme_ids[pos]
+            mid = vid_to_mid.get(int(vid))
+            if mid is None:
+                continue
             row = meme_rows.get(mid)
             if row is None:
                 continue
@@ -236,7 +255,7 @@ class MemeRetriever:
                 tag=row["tag"],
                 similarity=raw,
                 raw_similarity=raw,
-                usage_count=row.get("usage_count", 0),
+                usage_count=row.get("usage_count", 0) or 0,
                 last_used_at=row.get("last_used_at"),
                 description=row.get("description"),
                 fallback_used=used_fallback,
@@ -310,8 +329,13 @@ class MemeRetriever:
         n: int = 2,
         anti_repeat: bool = True,
         fallback_to_all_tags: bool = True,
+        stochastic: bool | None = None,
     ) -> list[MemeHit]:
-        """取 top-n 张（标记已用）。"""
+        """取 top-n 张（标记已用）。
+
+        stochastic=None 时沿用 retriever 实例的默认行为；显式传 False 可强制按相似度最高选。
+        """
+        do_stochastic = self._stochastic_default if stochastic is None else bool(stochastic)
         result = self.retrieve(
             text=text,
             tag=tag,
@@ -322,7 +346,10 @@ class MemeRetriever:
         chosen: list[MemeHit] = []
         pool = list(result.hits)
         while pool and len(chosen) < n:
-            hit = self._weighted_pick(pool)
+            if do_stochastic:
+                hit = self._weighted_pick(pool)
+            else:
+                hit = pool[0]
             if hit is None:
                 break
             self.db.mark_used(hit.meme_id)

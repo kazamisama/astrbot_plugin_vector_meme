@@ -1,4 +1,4 @@
-"""vector_meme 插件主入口。
+﻿"""vector_meme 插件主入口。
 
 提供：
 - 索引管理命令
@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import copy
 import json
 import os
@@ -56,7 +57,7 @@ DEFAULT_PROMPT_TAIL_2 = (
     PLUGIN_NAME,
     "chiriu & 橘雪莉",
     "基于向量检索的智能表情包插件",
-    "0.1.0",
+    "0.2.0",
 )
 class VectorMemePlugin(Star):
     def __init__(self, context: Context, config: dict | None = None):
@@ -114,25 +115,50 @@ class VectorMemePlugin(Star):
         async with self._embedder_lock:
             if self._embedder is not None:
                 return self._embedder
-            loop = asyncio.get_event_loop()
+            loop = asyncio.get_running_loop()
+
+            embedder_kwargs = self._embedder_kwargs()
+            env_overrides: dict = {}
+            if embedder_kwargs.get("hf_endpoint"):
+                env_overrides["HF_ENDPOINT"] = embedder_kwargs["hf_endpoint"]
+            if embedder_kwargs.get("cache_dir_env"):
+                cd = embedder_kwargs["cache_dir_env"]
+                env_overrides.setdefault("HF_HOME", cd)
+                env_overrides.setdefault("HUGGINGFACE_HUB_CACHE", cd)
+                env_overrides.setdefault("TORCH_HOME", str(Path(cd) / "torch"))
 
             def _create():
-                return EmbedderFactory.create(
-                    self._backend_name,
-                    **self._embedder_kwargs(),
-                )
+                with self._env_scope(env_overrides):
+                    return EmbedderFactory.create(
+                        self._backend_name,
+                        **{k: v for k, v in embedder_kwargs.items() if k not in ("hf_endpoint", "cache_dir_env")},
+                    )
 
             self._embedder = await loop.run_in_executor(None, _create)
-            # 如果维度不匹配，需要重建 db
+            # 维度不匹配：库里已有数据则拒绝静默重建，避免丢索引
             if self._db is not None and self._db.dim != self._embedder.dim:
+                embedder_dim = self._embedder.dim
+                existing_count = self._db.total_count()
+                if existing_count > 0:
+                    try:
+                        self._embedder.close()
+                    except Exception:
+                        pass
+                    self._embedder = None
+                    raise RuntimeError(
+                        f"embedder 维度 ({embedder_dim}) 与现有库维度 ({self._db.dim}) 不一致，"
+                        f"且库里已有 {existing_count} 条数据。为避免静默丢失向量索引，"
+                        f"请运行 /表情向量 重建 重建索引，或回退到原来的模型。"
+                    )
+                # 库里无数据：允许按新维度建表
                 logger.info(
-                    "embedder 维度 %d 与现有库维度 %d 不一致，重建库",
-                    self._embedder.dim, self._db.dim,
+                    "embedder 维度 %d 与临时库维度 %d 不一致，因库里无数据，按新维度建库",
+                    embedder_dim, self._db.dim,
                 )
                 self._db = MemeDatabase(
                     db_path=self.data_dir / "memes.db",
                     index_path=self.data_dir / "memes.faiss",
-                    dim=self._embedder.dim,
+                    dim=embedder_dim,
                 )
             self._indexer = MemeIndexer(
                 self._db, self._embedder,
@@ -148,35 +174,52 @@ class VectorMemePlugin(Star):
             )
             return self._embedder
 
+    @staticmethod
+    @contextlib.contextmanager
+    def _env_scope(env_overrides: dict):
+        """临时覆盖 os.environ，退出时还原，避免污染同进程其他插件。"""
+        snapshot = {k: os.environ.get(k) for k in env_overrides}
+        try:
+            for k, v in env_overrides.items():
+                if v is None:
+                    os.environ.pop(k, None)
+                else:
+                    os.environ[k] = v
+            yield
+        finally:
+            for k, prev in snapshot.items():
+                if prev is None:
+                    os.environ.pop(k, None)
+                else:
+                    os.environ[k] = prev
+
     def _embedder_kwargs(self) -> dict:
-        if self._backend_name == "open_clip":
-            hf_endpoint = (self.config.get("hf_endpoint") or "").strip()
-            if hf_endpoint:
-                os.environ["HF_ENDPOINT"] = hf_endpoint
-            cache_dir = (self.config.get("open_clip_cache_dir") or "").strip()
-            if not cache_dir:
-                cache_dir = str(Path(__file__).resolve().parent / "models" / "cache")
-            Path(cache_dir).mkdir(parents=True, exist_ok=True)
-            os.environ.setdefault("HF_HOME", cache_dir)
-            os.environ.setdefault("HUGGINGFACE_HUB_CACHE", cache_dir)
-            os.environ.setdefault("TORCH_HOME", str(Path(cache_dir) / "torch"))
-            local_weights = (self.config.get("open_clip_local_weights") or "").strip().strip('\"').strip("'")
-            if local_weights:
-                local_path = Path(local_weights).expanduser()
-                if not local_path.exists():
-                    raise FileNotFoundError(f"open_clip_local_weights 指向的文件不存在: {local_path}")
-                pretrained = str(local_path)
-                logger.info(f"[{PLUGIN_NAME}] 使用本地 OpenCLIP 权重: {pretrained}")
-            else:
-                pretrained = self.config.get("open_clip_pretrained", "openai")
-                logger.info(f"[{PLUGIN_NAME}] 未设置本地权重，使用在线 pretrained tag: {pretrained}")
-            return {
-                "model_name": self.config.get("open_clip_model", "ViT-B-32"),
-                "pretrained": pretrained,
-                "device": self.config.get("device", "cpu"),
-                "cache_dir": cache_dir,
-            }
-        return {}
+        """纯配置解析，不修改全局状态。env 变量在 _create() 内通过 _env_scope 临时设置。"""
+        if self._backend_name != "open_clip":
+            return {}
+        hf_endpoint = (self.config.get("hf_endpoint") or "").strip()
+        cache_dir = (self.config.get("open_clip_cache_dir") or "").strip()
+        if not cache_dir:
+            cache_dir = str(Path(__file__).resolve().parent / "models" / "cache")
+        Path(cache_dir).mkdir(parents=True, exist_ok=True)
+        local_weights = (self.config.get("open_clip_local_weights") or "").strip().strip('\"').strip("'")
+        if local_weights:
+            local_path = Path(local_weights).expanduser()
+            if not local_path.exists():
+                raise FileNotFoundError(f"open_clip_local_weights 指向的文件不存在: {local_path}")
+            pretrained = str(local_path)
+            logger.info(f"[{PLUGIN_NAME}] 使用本地 OpenCLIP 权重: {pretrained}")
+        else:
+            pretrained = self.config.get("open_clip_pretrained", "openai")
+            logger.info(f"[{PLUGIN_NAME}] 未设置本地权重，使用在线 pretrained tag: {pretrained}")
+        return {
+            "model_name": self.config.get("open_clip_model", "ViT-B-32"),
+            "pretrained": pretrained,
+            "device": self.config.get("device", "cpu"),
+            "cache_dir": cache_dir,
+            "hf_endpoint": hf_endpoint,
+            "cache_dir_env": cache_dir,
+        }
 
     async def _ensure_ready(self) -> tuple[MemeRetriever, MemeIndexer, MemeDatabase] | None:
         await self._ensure_embedder()
@@ -202,8 +245,8 @@ class VectorMemePlugin(Star):
             return
         _, indexer, _ = ready
         async with self._indexer_lock:
-            await asyncio.get_event_loop().run_in_executor(
-                None, lambda: indexer.index_directory(self.meme_dir)
+            await asyncio.to_thread(
+                lambda: indexer.index_directory(self.meme_dir)
             )
         # 标签列表可能已变化，重新注入
         self._inject_into_personas()
@@ -438,8 +481,7 @@ class VectorMemePlugin(Star):
         reporter_task = asyncio.create_task(_progress_reporter())
         try:
             async with self._indexer_lock:
-                progress = await asyncio.get_event_loop().run_in_executor(
-                    None,
+                progress = await asyncio.to_thread(
                     lambda: indexer.index_directory(path, progress=IndexProgress(_on_progress)),
                 )
         finally:
@@ -555,8 +597,8 @@ class VectorMemePlugin(Star):
                 if indexer.db.index_path.exists():
                     indexer.db.index_path.unlink()
                 indexer.db._index = type(indexer.db._index)(indexer.db.dim)  # noqa: SLF001
-                progress = await asyncio.get_event_loop().run_in_executor(
-                    None, lambda: indexer.index_directory(path, progress=IndexProgress(_on_progress))
+                progress = await asyncio.to_thread(
+                    lambda: indexer.index_directory(path, progress=IndexProgress(_on_progress))
                 )
         finally:
             reporter_done.set()
@@ -606,20 +648,27 @@ class VectorMemePlugin(Star):
 
     async def _cmd_search(self, event: AstrMessageEvent, rest: list[str]):
         if not rest:
-            yield event.plain_result("用法: /vm 搜索 <文本> [标签]")
+            yield event.plain_result("用法: /vm 搜索 <文本> [--tag <标签>]")
             return
-        text = " ".join(rest)
+        # 显式 --tag <name> 才视为标签过滤；不再用"最后一个词是否是已知 tag"的启发式，
+        # 避免文本里恰好出现 tag 名时被吞掉（如查询"你今天真happy"会丢掉 happy）。
         tag = None
-        # 简易解析：最后一个参数如果是已知 tag 就当 tag
-        if rest[-1] in {t for t, _ in (self._db.count_by_tag() if self._db else {}).items()}:
-            tag = rest[-1]
-            text = " ".join(rest[:-1])
+        text_parts: list[str] = []
+        i = 0
+        while i < len(rest):
+            if rest[i] == "--tag" and i + 1 < len(rest):
+                tag = rest[i + 1]
+                i += 2
+            else:
+                text_parts.append(rest[i])
+                i += 1
+        text = " ".join(text_parts)
         ready = await self._ensure_ready()
         if not ready:
             yield event.plain_result("embedder 未就绪")
             return
         retriever, _, _ = ready
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
         result = await loop.run_in_executor(
             None, lambda: retriever.retrieve(text=text, tag=tag, topk=5)
         )
@@ -639,20 +688,26 @@ class VectorMemePlugin(Star):
     async def _cmd_explain(self, event: AstrMessageEvent, rest: list[str]):
         """解释一次检索为什么会选中某张图。"""
         if not rest:
-            yield event.plain_result("用法: 表情向量 解释 <文本> [标签]")
+            yield event.plain_result("用法: 表情向量 解释 <文本> [--tag <标签>]")
             return
-        text = " ".join(rest)
+        # 显式 --tag <name> 才视为标签过滤，避免歧义
         tag = None
-        counts = self._db.count_by_tag() if self._db else {}
-        if rest[-1] in counts:
-            tag = rest[-1]
-            text = " ".join(rest[:-1]) or tag
+        text_parts: list[str] = []
+        i = 0
+        while i < len(rest):
+            if rest[i] == "--tag" and i + 1 < len(rest):
+                tag = rest[i + 1]
+                i += 2
+            else:
+                text_parts.append(rest[i])
+                i += 1
+        text = " ".join(text_parts)
         ready = await self._ensure_ready()
         if not ready:
             yield event.plain_result("embedder 未就绪")
             return
         retriever, _, _ = ready
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
         result = await loop.run_in_executor(
             None,
             lambda: retriever.retrieve(
@@ -746,8 +801,8 @@ class VectorMemePlugin(Star):
             yield event.plain_result("embedder 未就绪")
             return
         _, indexer, db = ready
-        removed = await asyncio.get_event_loop().run_in_executor(
-            None, lambda: indexer.remove_missing(self.meme_dir)
+        removed = await asyncio.to_thread(
+            lambda: indexer.remove_missing(self.meme_dir)
         )
         counts = db.count_by_tag()
         for tag in counts:
@@ -775,7 +830,7 @@ class VectorMemePlugin(Star):
         if not row:
             yield event.plain_result(f"id 不存在: {meme_id}")
             return
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
         preds = await loop.run_in_executor(
             None,
             lambda: retriever.classify_meme(
@@ -892,7 +947,7 @@ class VectorMemePlugin(Star):
                     top3 += 1
             return total, top1, top3, failed, confused
 
-        total, top1, top3, failed, confused = await asyncio.get_event_loop().run_in_executor(None, _run_eval)
+        total, top1, top3, failed, confused = await asyncio.to_thread(_run_eval)
         if total <= 0:
             yield event.plain_result(f"没有可评测样本（失败 {failed}）")
             return
@@ -963,8 +1018,8 @@ class VectorMemePlugin(Star):
             "  表情向量 重建\n"
             "  表情向量 列表 [标签]\n"
             "  表情向量 标签\n"
-            "  表情向量 搜索 <文本> [标签]\n"
-            "  表情向量 解释 <文本> [标签]\n"
+            "  表情向量 搜索 <文本> [--tag <标签>]\n"
+            "  表情向量 解释 <文本> [--tag <标签>]\n"
             "  表情向量 最近使用 [数量]\n"
             "  表情向量 诊断 / 健康检查\n"
             "  表情向量 修复\n"
@@ -1070,9 +1125,9 @@ class VectorMemePlugin(Star):
             query_text = query_text[:qmax]
 
         try:
-            # 先清理最终消息链里可能残留的占位符
+            # 清理占位符：in-place 修改 Plain.text，保留原对象引用，避免破坏其他插件/装饰器对原链的依赖。
+            # 原链若不是 Plain-only（例如包含 Image 等组件），不要丢任何组件；空 Plain 设为空串即可。
             original_chain = result.chain
-            cleaned_components = []
 
             def _clean_text(s: str) -> str:
                 s = VM_TAG_PATTERN.sub("", s)
@@ -1080,32 +1135,28 @@ class VectorMemePlugin(Star):
                     s = LEGACY_TAG_PATTERN.sub("", s)
                 return s
 
-            if original_chain:
-                if isinstance(original_chain, str):
-                    cleaned = _clean_text(original_chain)
-                    if cleaned.strip():
-                        cleaned_components.append(Plain(cleaned.strip()))
-                elif isinstance(original_chain, MessageChain):
-                    iterable = original_chain.chain
-                    for component in iterable:
-                        if isinstance(component, Plain):
-                            cleaned = _clean_text(component.text)
-                            if cleaned.strip():
-                                cleaned_components.append(Plain(cleaned.strip()))
-                        else:
-                            cleaned_components.append(component)
-                elif isinstance(original_chain, list):
-                    for component in original_chain:
-                        if isinstance(component, Plain):
-                            cleaned = _clean_text(component.text)
-                            if cleaned.strip():
-                                cleaned_components.append(Plain(cleaned.strip()))
-                        else:
-                            cleaned_components.append(component)
+            def _iter_components(chain):
+                if chain is None:
+                    return []
+                if isinstance(chain, str):
+                    return [Plain(chain)]
+                if isinstance(chain, MessageChain):
+                    return chain.chain
+                if isinstance(chain, list):
+                    return chain
+                return []
+
+            def _set_chain(new_chain):
+                if isinstance(original_chain, MessageChain):
+                    original_chain.chain = new_chain
+                else:
+                    result.chain = new_chain
+
+            for component in _iter_components(original_chain):
+                if isinstance(component, Plain):
+                    component.text = _clean_text(component.text)
 
             if not tags:
-                if cleaned_components:
-                    result.chain = cleaned_components
                 return
 
             # 概率判定放在 decorating 阶段
@@ -1113,19 +1164,15 @@ class VectorMemePlugin(Star):
             prob = int(self.config.get("trigger_probability", 80))
             if random.randint(1, 100) > prob:
                 event.set_extra("vector_meme_pending_tags", None)
-                if cleaned_components:
-                    result.chain = cleaned_components
                 return
 
             ready = await self._ensure_ready()
             if not ready:
                 logger.warning(f"[{PLUGIN_NAME}] retriever 未就绪，跳过自动表情")
-                if cleaned_components:
-                    result.chain = cleaned_components
                 return
             retriever, _, _ = ready
 
-            loop = asyncio.get_event_loop()
+            loop = asyncio.get_running_loop()
             images = []
             for tag in tags:
                 hit = await loop.run_in_executor(
@@ -1149,35 +1196,45 @@ class VectorMemePlugin(Star):
             event.set_extra("vector_meme_pending_tags", None)
 
             if not images:
-                if cleaned_components:
-                    result.chain = cleaned_components
                 return
 
-            # 默认混合图文；如关闭则 after_message_sent 补发
+            # 默认混合图文：图片追加到文本链末尾，并保留原链类型（MessageChain 或 list）。
+            # 关闭混合模式：原链保持清洗后状态，图片通过 after_message_sent 补发。
             enable_mixed = bool(self.config.get("enable_mixed_message", True))
             if enable_mixed:
-                # 简单策略：图片追加到文本后。后续可做更复杂插入策略。
-                result.chain = (cleaned_components if cleaned_components else []) + images
+                _set_chain(_iter_components(original_chain) + images)
             else:
-                result.chain = cleaned_components
                 event.set_extra("vector_meme_pending_images", images)
         except Exception:
             logger.exception(f"[{PLUGIN_NAME}] decorating 出错")
 
     @filter.after_message_sent()
     async def after_message_sent(self, event: AstrMessageEvent):
-        """发送后补发非混合模式下的图片。"""
+        """发送后补发非混合模式下的图片。
+
+        优先用 event.send（per-event API，AstrBot 多数平台都能走），失败时回退到 context.send_message。
+        不再硬编码平台分支，因为不同 AstrBot 版本下 gewechat/aiocqhttp 的 send 行为不一致。
+        """
         pending_images = event.get_extra("vector_meme_pending_images")
+        if not pending_images:
+            return
         try:
-            if pending_images:
-                for image in pending_images:
-                    if event.get_platform_name() == "gewechat":
-                        await event.send(MessageChain([image]))
-                    else:
-                        await self.context.send_message(
-                            event.unified_msg_origin,
-                            MessageChain([image]),
-                        )
+            for image in pending_images:
+                chain = MessageChain([image])
+                sent = False
+                send = getattr(event, "send", None)
+                if callable(send):
+                    try:
+                        await send(chain)
+                        sent = True
+                    except Exception as e:
+                        logger.debug(f"[{PLUGIN_NAME}] event.send 失败，回退 context.send_message: {e}")
+                if not sent:
+                    umo = getattr(event, "unified_msg_origin", None)
+                    if umo is None:
+                        logger.warning(f"[{PLUGIN_NAME}] 缺少 unified_msg_origin，无法补发表情")
+                        continue
+                    await self.context.send_message(umo, chain)
         except Exception:
             logger.exception(f"[{PLUGIN_NAME}] after_message_sent 补发表情失败")
         finally:

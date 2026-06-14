@@ -124,9 +124,7 @@ class MemeIndexer:
         if not files:
             return progress
 
-        # 收集已存在记录的 hash，做增量
-        existing = {row["file_path"]: row for row in self.db.list_memes(include_disabled=True, limit=10_000_000)}
-        # 走 list_memes 实际有 limit，但表小；这里直接全量
+        # 收集已存在记录的 hash（一次 SQL），做增量判重用
         with self.db._conn() as c:  # noqa: SLF001 - 受控内部访问
             rows = c.execute("SELECT file_path, file_hash FROM memes").fetchall()
             existing = {r["file_path"]: r["file_hash"] for r in rows}
