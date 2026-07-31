@@ -1240,6 +1240,63 @@ class VectorMemePlugin(Star):
         finally:
             event.set_extra("vector_meme_pending_images", None)
 
+    async def search_sticker_for_external(
+        self,
+        tag: str,
+        user_id: str = '',
+        scope_id: str = '',
+        max_n: int = 1,
+    ) -> str | None:
+        '''External entry point for other plugins: pick one sticker by emotion/semantic tag.
+
+        Contract (agreed with astrbot_plugin_xml_structured_output):
+        - Never raises: empty tag / cold embedder / timeout / no match all return None.
+        - Does NOT call pick(): no mark_used / anti_repeat writes, so external
+          high-frequency calls never pollute the internal dedup pool.
+        - Cold embedder returns None immediately; this path never triggers the
+          lazy model load (which can take minutes).
+        - Whole call is bounded by a 2s timeout (embed + DB query included).
+        - user_id / scope_id are reserved for future per-user dedup; v1 ignores
+          them because the internal dedup window is global, not per-user.
+
+        Returns:
+            Absolute local file path, or None when nothing matches / on failure.
+        '''
+        try:
+            tag = (tag or '').strip()
+            if not tag or not self._is_valid_emotion_tag(tag):
+                return None
+            if self._embedder is None or self._retriever is None or self._db is None:
+                return None
+            max_n = max(int(max_n), 1)
+            retriever = self._retriever
+
+            def _search() -> str | None:
+                result = retriever.retrieve(
+                    text=tag,
+                    tag=tag,
+                    topk=max_n,
+                    anti_repeat=False,
+                    fallback_to_all_tags=False,
+                )
+                if not result.hits:
+                    return None
+                # rerank adds random jitter to similarity; pick by raw_similarity
+                # so identical inputs always yield the identical sticker.
+                hit = max(
+                    result.hits,
+                    key=lambda h: h.raw_similarity if h.raw_similarity is not None else h.similarity,
+                )
+                return hit.file_path
+
+            path = await asyncio.wait_for(asyncio.to_thread(_search), timeout=2.0)
+            if not path:
+                return None
+            return str(Path(path).resolve())
+        except Exception:
+            logger.debug(f'[{PLUGIN_NAME}] search_sticker_for_external failed: tag={tag!r}', exc_info=True)
+            return None
+
     def _is_valid_emotion_tag(self, tag: str) -> bool:
         """判断提取出的 tag 是不是一个合法表情标签。
 
