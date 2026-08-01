@@ -60,13 +60,26 @@ DEFAULT_PROMPT_TAIL_2 = (
     PLUGIN_NAME,
     "chiriu & 橘雪莉",
     "基于向量检索的智能表情包插件",
-    "0.4.0",
+    "0.4.1",
 )
 class VectorMemePlugin(Star):
     def __init__(self, context: Context, config: dict | None = None):
         super().__init__(context)
         self.context = context
         self.config = config or {}
+
+        # ---------- 拍平分组配置 ----------
+        # _conf_schema.json 顶层 object 分组（参考 engram），AstrBot 以嵌套 dict 传入；
+        # 拍平后 self.config.get("key") 读取方式不变，持久化仍按 schema 结构保存。
+        flat_config: dict = {}
+        for _group, _items in self.config.items():
+            if isinstance(_items, dict) and all(
+                not isinstance(_v, dict) for _v in _items.values()
+            ):
+                flat_config.update(_items)
+            else:
+                flat_config[_group] = _items
+        self.config = flat_config
 
         # ---------- 解析配置 ----------
         data_dir = Path(self.config.get("data_dir") or "") if self.config.get("data_dir") else None

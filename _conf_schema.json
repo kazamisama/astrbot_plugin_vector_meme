@@ -1,192 +1,234 @@
 {
-  "meme_dir": {
-    "description": "【基础路径与存储】表情包根目录，留空使用插件自带的 memes/ 目录（推荐：先跑 scripts/copy_meme_manager_library.py 复制一份）",
-    "type": "string",
-    "default": "",
-    "hint": "两种用法：① 留空 → 用插件自带的 memes/（独立，不影响 meme_manager）；② 填 meme_manager 的 memes 路径 → 直接联动，修改源会影响两边"
+  "basic": {
+    "description": "基础路径与存储",
+    "type": "object",
+    "items": {
+      "meme_dir": {
+        "description": "表情包根目录，留空使用插件自带的 memes/ 目录",
+        "type": "string",
+        "default": "",
+        "hint": "两种用法：① 留空 → 用插件自带的 memes/（独立，不影响 meme_manager）；② 填 meme_manager 的 memes 路径 → 直接联动，修改源会影响两边"
+      },
+      "data_dir": {
+        "description": "插件数据目录（存储数据库和 FAISS 索引），留空使用默认",
+        "type": "string",
+        "default": ""
+      }
+    }
   },
-  "data_dir": {
-    "description": "【基础路径与存储】插件数据目录（存储数据库和 FAISS 索引），留空使用默认",
-    "type": "string",
-    "default": ""
+  "model": {
+    "description": "模型与设备",
+    "type": "object",
+    "items": {
+      "embedder_backend": {
+        "description": "嵌入模型后端",
+        "type": "string",
+        "default": "open_clip",
+        "options": [
+          "open_clip",
+          "dummy"
+        ],
+        "hint": "open_clip = OpenCLIP ViT-B-32（推荐）；dummy = 随机向量（仅用于测试）"
+      },
+      "device": {
+        "description": "推理设备",
+        "type": "string",
+        "default": "cpu",
+        "options": [
+          "cpu",
+          "cuda"
+        ],
+        "hint": "有显卡就选 cuda；没有 CUDA 环境请保持 cpu"
+      },
+      "open_clip_model": {
+        "description": "OpenCLIP 模型名称",
+        "type": "string",
+        "default": "ViT-B-32",
+        "hint": "推荐 ViT-B-32（轻量）或 ViT-L-14（精度更高但慢）"
+      },
+      "open_clip_pretrained": {
+        "description": "OpenCLIP 预训练权重",
+        "type": "string",
+        "default": "openai",
+        "hint": "推荐 openai（下载源较稳）；可选 laion2b_s34b_b79k / laion400m_e32 等"
+      },
+      "open_clip_local_weights": {
+        "description": "OpenCLIP 权重本地路径，留空走在线下载",
+        "type": "string",
+        "default": "",
+        "hint": "指向本地 open_clip_pytorch_model.bin 文件，可绕开 HF 网络问题。需要先手动下载权重到本地"
+      },
+      "open_clip_cache_dir": {
+        "description": "OpenCLIP / HuggingFace 模型缓存目录，留空使用插件 models/cache",
+        "type": "string",
+        "default": "",
+        "hint": "可填绝对路径。用于避免每次重新下载模型权重"
+      },
+      "hf_endpoint": {
+        "description": "HuggingFace 镜像地址，用于 OpenCLIP 权重下载",
+        "type": "string",
+        "default": "https://hf-mirror.com",
+        "hint": "国内网络建议使用 https://hf-mirror.com；如果网络正常也可留空"
+      }
+    }
   },
-
-  "enable_vision_caption": {
-    "description": "【语义增强】启用 vision LLM 生成表情语义描述（caption），并参与双路向量检索",
-    "type": "bool",
-    "default": false,
-    "hint": "需要 AstrBot 配置了支持图片输入的视觉模型；开启后索引/重建会自动补 caption，也可用 /vm caption 手动补"
+  "caption": {
+    "description": "语义增强（vision caption）",
+    "type": "object",
+    "items": {
+      "enable_vision_caption": {
+        "description": "启用 vision LLM 生成表情语义描述（caption），并参与双路向量检索",
+        "type": "bool",
+        "default": false,
+        "hint": "需要 AstrBot 配置了支持图片输入的视觉模型；开启后索引/重建会自动补 caption，也可用 /vm caption 手动补"
+      },
+      "vision_provider_id": {
+        "description": "用于生成 caption 的视觉模型 provider ID（留空则禁用 caption）",
+        "type": "string",
+        "default": ""
+      },
+      "caption_score_weight": {
+        "description": "双路检索中 caption 文本向量权重（0-1，其余为图片向量权重）",
+        "type": "float",
+        "default": 0.6
+      },
+      "caption_batch_limit": {
+        "description": "单次 caption 补全最大处理张数",
+        "type": "int",
+        "default": 500
+      }
+    }
   },
-  "vision_provider_id": {
-    "description": "【语义增强】用于生成 caption 的视觉模型 provider ID（留空则禁用 caption）",
-    "type": "string",
-    "default": ""
+  "indexing": {
+    "description": "索引与标签",
+    "type": "object",
+    "items": {
+      "use_subdir_as_tag": {
+        "description": "将子目录名作为标签使用",
+        "type": "bool",
+        "default": true,
+        "hint": "如果你的图片按子目录分类（memes/happy/xxx.png），开启此项会自动用子目录名作为标签"
+      },
+      "default_tag": {
+        "description": "无标签图片的默认标签",
+        "type": "string",
+        "default": "misc"
+      }
+    }
   },
-  "caption_score_weight": {
-    "description": "【语义增强】双路检索中 caption 文本向量权重（0-1，其余为图片向量权重）",
-    "type": "float",
-    "default": 0.6
+  "retrieval": {
+    "description": "检索选择与反重复",
+    "type": "object",
+    "items": {
+      "anti_repeat_window": {
+        "description": "同一张图在多少条消息内不重复使用",
+        "type": "int",
+        "default": 20
+      },
+      "selection_pool_size": {
+        "description": "每次选表情时进入加权随机采样的候选池大小",
+        "type": "int",
+        "default": 12,
+        "hint": "越大越不容易重复，但可能选到语义稍弱的图。推荐 8-16"
+      },
+      "enable_stochastic_selection": {
+        "description": "是否在 TopK 候选中按分数加权随机选图",
+        "type": "bool",
+        "default": true,
+        "hint": "开启后不会总是固定 top1，更自然；关闭则总选最高分"
+      },
+      "selection_random_jitter": {
+        "description": "检索重排序时加入的小随机扰动",
+        "type": "float",
+        "default": 0.015,
+        "hint": "用于打散相近分数候选。0 表示关闭"
+      }
+    }
   },
-  "caption_batch_limit": {
-    "description": "【语义增强】单次 caption 补全最大处理张数",
-    "type": "int",
-    "default": 500
+  "llm": {
+    "description": "LLM 标签与发送",
+    "type": "object",
+    "items": {
+      "allow_legacy_markup": {
+        "description": "兼容旧表情标记 &&tag&& / :tag:",
+        "type": "bool",
+        "default": false,
+        "hint": "默认关闭，避免和 meme_manager 抢同一个 &&tag&& 标记；如不启用 meme_manager 可打开"
+      },
+      "enable_prompt_injection": {
+        "description": "向全局人格注入表情标签使用说明",
+        "type": "bool",
+        "default": true,
+        "hint": "开启：把可用标签列表和规则注入到每个 persona 的 system_prompt，让 LLM 知道有 %%tag%% 这回事；关闭后依赖用户自己在人格 prompt 里说明"
+      },
+      "prompt_head": {
+        "description": "注入到人格的开头部分（标签列表之前）",
+        "type": "string",
+        "default": ""
+      },
+      "prompt_tail_1": {
+        "description": "标签列表和数量上限之间的连接文本",
+        "type": "string",
+        "default": ""
+      },
+      "prompt_tail_2": {
+        "description": "数量上限之后追加的规则",
+        "type": "string",
+        "default": ""
+      },
+      "trigger_probability": {
+        "description": "LLM 输出情绪标签时实际发送表情的概率（%）",
+        "type": "int",
+        "default": 80,
+        "slider": {
+          "min": 0,
+          "max": 100,
+          "step": 5
+        }
+      },
+      "enable_mixed_message": {
+        "description": "自动表情是否混合到同一条回复中",
+        "type": "bool",
+        "default": true,
+        "hint": "开启：文本和图片一起发送；关闭：先发文本，after_message_sent 再补发表情"
+      },
+      "max_per_message": {
+        "description": "单条消息最多发送的表情数量",
+        "type": "int",
+        "default": 2
+      },
+      "query_text_max_length": {
+        "description": "用 LLM 回复文本检索时，最多取前 N 个字符",
+        "type": "int",
+        "default": 80,
+        "hint": "CLIP 对短文本更敏感；长文本会稀释语义。0 表示不截断"
+      }
+    }
   },
-  "embedder_backend": {
-    "description": "【模型与设备】嵌入模型后端",
-    "type": "string",
-    "default": "open_clip",
-    "options": ["open_clip", "dummy"],
-    "hint": "open_clip = OpenCLIP ViT-B-32（推荐）；dummy = 随机向量（仅用于测试）"
-  },
-  "device": {
-    "description": "【模型与设备】推理设备",
-    "type": "string",
-    "default": "cpu",
-    "options": ["cpu", "cuda"],
-    "hint": "有显卡就选 cuda；没有 CUDA 环境请保持 cpu"
-  },
-  "open_clip_model": {
-    "description": "【模型与设备】OpenCLIP 模型名称",
-    "type": "string",
-    "default": "ViT-B-32",
-    "hint": "推荐 ViT-B-32（轻量）或 ViT-L-14（精度更高但慢）"
-  },
-  "open_clip_pretrained": {
-    "description": "【模型与设备】OpenCLIP 预训练权重",
-    "type": "string",
-    "default": "openai",
-    "hint": "推荐 openai（下载源较稳）；可选 laion2b_s34b_b79k / laion400m_e32 等"
-  },
-  "open_clip_local_weights": {
-    "description": "【模型与设备】OpenCLIP 权重本地路径，留空走在线下载",
-    "type": "string",
-    "default": "",
-    "hint": "指向本地 open_clip_pytorch_model.bin 文件，可绕开 HF 网络问题。需要先手动下载权重到本地"
-  },
-  "open_clip_cache_dir": {
-    "description": "【模型与设备】OpenCLIP / HuggingFace 模型缓存目录，留空使用插件 models/cache",
-    "type": "string",
-    "default": "",
-    "hint": "可填绝对路径。用于避免每次重新下载模型权重"
-  },
-  "hf_endpoint": {
-    "description": "【模型与设备】HuggingFace 镜像地址，用于 OpenCLIP 权重下载",
-    "type": "string",
-    "default": "https://hf-mirror.com",
-    "hint": "国内网络建议使用 https://hf-mirror.com；如果网络正常也可留空"
-  },
-
-  "auto_index_on_start": {
-    "description": "【索引与标签】启动时自动扫描 meme_dir 建立索引",
-    "type": "bool",
-    "default": false
-  },
-  "use_subdir_as_tag": {
-    "description": "【索引与标签】将子目录名作为标签使用",
-    "type": "bool",
-    "default": true,
-    "hint": "如果你的图片按子目录分类（memes/happy/xxx.png），开启此项会自动用子目录名作为标签"
-  },
-  "default_tag": {
-    "description": "【索引与标签】无标签图片的默认标签",
-    "type": "string",
-    "default": "misc"
-  },
-
-  "allow_legacy_markup": {
-    "description": "【LLM 标签与发送】兼容旧表情标记 &&tag&& / :tag:",
-    "type": "bool",
-    "default": false,
-    "hint": "默认关闭，避免和 meme_manager 抢同一个 &&tag&& 标记；如不启用 meme_manager 可打开"
-  },
-  "enable_prompt_injection": {
-    "description": "【LLM 标签与发送】向全局人格注入表情标签使用说明",
-    "type": "bool",
-    "default": true,
-    "hint": "开启：把可用标签列表和规则注入到每个 persona 的 system_prompt，让 LLM 知道有 %%tag%% 这回事；关闭后依赖用户自己在人格 prompt 里说明"
-  },
-  "prompt_head": {
-    "description": "【LLM 标签与发送】注入到人格的开头部分（标签列表之前）",
-    "type": "string",
-    "default": ""
-  },
-  "prompt_tail_1": {
-    "description": "【LLM 标签与发送】标签列表和数量上限之间的连接文本",
-    "type": "string",
-    "default": ""
-  },
-  "prompt_tail_2": {
-    "description": "【LLM 标签与发送】数量上限之后追加的规则",
-    "type": "string",
-    "default": ""
-  },
-  "trigger_probability": {
-    "description": "【LLM 标签与发送】LLM 输出情绪标签时实际发送表情的概率（%）",
-    "type": "int",
-    "default": 80,
-    "slider": {"min": 0, "max": 100, "step": 5}
-  },
-  "enable_mixed_message": {
-    "description": "【LLM 标签与发送】自动表情是否混合到同一条回复中",
-    "type": "bool",
-    "default": true,
-    "hint": "开启：文本和图片一起发送；关闭：先发文本，after_message_sent 再补发表情"
-  },
-  "max_per_message": {
-    "description": "【LLM 标签与发送】单条消息最多发送的表情数量",
-    "type": "int",
-    "default": 2
-  },
-  "query_text_max_length": {
-    "description": "【LLM 标签与发送】用 LLM 回复文本检索时，最多取前 N 个字符",
-    "type": "int",
-    "default": 80,
-    "hint": "CLIP 对短文本更敏感；长文本会稀释语义。0 表示不截断"
-  },
-
-  "anti_repeat_window": {
-    "description": "【检索选择与反重复】同一张图在多少条消息内不重复使用",
-    "type": "int",
-    "default": 20
-  },
-  "selection_pool_size": {
-    "description": "【检索选择与反重复】每次选表情时进入加权随机采样的候选池大小",
-    "type": "int",
-    "default": 12,
-    "hint": "越大越不容易重复，但可能选到语义稍弱的图。推荐 8-16"
-  },
-  "enable_stochastic_selection": {
-    "description": "【检索选择与反重复】是否在 TopK 候选中按分数加权随机选图",
-    "type": "bool",
-    "default": true,
-    "hint": "开启后不会总是固定 top1，更自然；关闭则总选最高分"
-  },
-  "selection_random_jitter": {
-    "description": "【检索选择与反重复】检索重排序时加入的小随机扰动",
-    "type": "float",
-    "default": 0.015,
-    "hint": "用于打散相近分数候选。0 表示关闭"
-  },
-
-  "auto_classify_threshold": {
-    "description": "【自动分类与评测】prototype/KNN 自动分类最低置信分",
-    "type": "float",
-    "default": 0.18
-  },
-  "auto_classify_margin": {
-    "description": "【自动分类与评测】自动分类第一名与第二名的最低分差",
-    "type": "float",
-    "default": 0.03
-  },
-  "auto_classify_knn_k": {
-    "description": "【自动分类与评测】自动分类使用的最近邻数量",
-    "type": "int",
-    "default": 12
-  },
-  "prototype_min_samples": {
-    "description": "【自动分类与评测】构建 tag prototype 所需的最少样本数",
-    "type": "int",
-    "default": 2
+  "classify": {
+    "description": "自动分类与评测",
+    "type": "object",
+    "items": {
+      "auto_classify_threshold": {
+        "description": "prototype/KNN 自动分类最低置信分",
+        "type": "float",
+        "default": 0.18
+      },
+      "auto_classify_margin": {
+        "description": "自动分类第一名与第二名的最低分差",
+        "type": "float",
+        "default": 0.03
+      },
+      "auto_classify_knn_k": {
+        "description": "自动分类使用的最近邻数量",
+        "type": "int",
+        "default": 12
+      },
+      "prototype_min_samples": {
+        "description": "构建 tag prototype 所需的最少样本数",
+        "type": "int",
+        "default": 2
+      }
+    }
   }
 }

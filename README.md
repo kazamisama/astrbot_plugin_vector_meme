@@ -75,14 +75,15 @@ pip install open_clip_torch torch
 
 ## 配置分组
 
-`_conf_schema.json` 已按用途分块：
+`_conf_schema.json` 已按用途分块（面板按卡片分组展示）：
 
 1. **基础路径与存储**：`meme_dir`、`data_dir`
-2. **模型与设备**：OpenCLIP 模型、权重、缓存、设备、HF 镜像
-3. **索引与标签**：启动索引、子目录 tag、默认 tag
-4. **LLM 标签与发送**：占位符、prompt 注入、触发概率、发送数量
+2. **模型与设备**：`embedder_backend`、设备、OpenCLIP 模型/权重/缓存、HF 镜像
+3. **语义增强（vision caption）**：`enable_vision_caption`、`vision_provider_id`、caption 权重与批量
+4. **索引与标签**：子目录 tag、默认 tag
 5. **检索选择与反重复**：反重复窗口、采样池、随机扰动
-6. **自动分类与评测**：prototype/KNN 分类阈值和样本数
+6. **LLM 标签与发送**：占位符、prompt 注入、触发概率、发送数量
+7. **自动分类与评测**：prototype/KNN 分类阈值和样本数
 
 推荐初始配置：
 
