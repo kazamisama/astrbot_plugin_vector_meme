@@ -10,12 +10,16 @@ EmbedderFactory.register("my_backend", MyEmbedder) 注册。
 """
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import io
+import logging
 import threading
 from abc import ABC, abstractmethod
 from pathlib import Path
-from typing import Type
+from typing import Any, Type
+
+logger = logging.getLogger(__name__)
 
 import numpy as np
 from PIL import Image
@@ -204,12 +208,139 @@ class OpenCLIPEmbedder(BaseEmbedder):
             pass
 
 
+# -------------------- API (AstrBot Embedding 提供商) --------------------
+
+class APIEmbedder(BaseEmbedder):
+    """通过 AstrBot 已配置的 Embedding 提供商编码文本。
+
+    - embed_text：调用 provider.get_embedding(text)（兼容 embedding/embed/encode 别名）
+    - embed_image：纯文本 embedding 无图片通道，抛 NotImplementedError；
+      索引侧应改用 caption 文本向量（api 后端强制开启 vision caption）。
+    """
+
+    _METHOD_NAMES = ("get_embedding", "embedding", "embed", "encode")
+
+    def __init__(
+        self,
+        context: Any | None = None,
+        provider_id: str = "",
+        timeout: float = 60.0,
+    ):
+        self._context = context
+        self._provider_id = provider_id or ""
+        self._timeout = float(timeout)
+        self._provider = None
+        self._dim: int | None = None
+        # 自建专用事件循环线程，避免调用方线程与 loop 线程冲突导致死锁
+        self._loop: asyncio.AbstractEventLoop | None = None
+        self._loop_ready = threading.Event()
+        self._loop_thread = threading.Thread(target=self._loop_runner, daemon=True)
+        self._loop_thread.start()
+        self._loop_ready.wait(timeout=5.0)
+        if self._loop is None:
+            raise RuntimeError("api embedder 事件循环启动失败")
+        self._probe()
+
+    def _loop_runner(self) -> None:
+        self._loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(self._loop)
+        self._loop_ready.set()
+        self._loop.run_forever()
+
+    def _run_async(self, coro):
+        return asyncio.run_coroutine_threadsafe(coro, self._loop).result(self._timeout)
+
+    def _resolve_provider(self):
+        context = self._context
+        if context is None:
+            raise RuntimeError("api embedder 需要 AstrBot context（插件实例）")
+        if self._provider_id:
+            getter = getattr(context, "get_provider_by_id", None)
+            if getter:
+                try:
+                    prov = getter(self._provider_id)
+                    if asyncio.iscoroutine(prov):
+                        prov = self._run_async(prov)
+                    if prov:
+                        return prov
+                except Exception as e:
+                    logger.warning("按 provider_id 获取 embedding provider 失败: %s", e)
+        getter = getattr(context, "get_all_embedding_providers", None)
+        if getter:
+            try:
+                provs = getter()
+                if asyncio.iscoroutine(provs):
+                    provs = self._run_async(provs)
+                for prov in (provs or []):
+                    if prov:
+                        return prov
+            except Exception as e:
+                logger.warning("获取 embedding providers 失败: %s", e)
+        raise RuntimeError(
+            "未找到可用的 AstrBot Embedding 提供商：请先在 AstrBot「服务提供商」配置，"
+            "并在插件配置 embedding_provider_id 指定"
+        )
+
+    def _call(self, text: str) -> list[float]:
+        prov = self._provider
+        if prov is None:
+            raise RuntimeError("api embedder provider 未初始化")
+        for name in self._METHOD_NAMES:
+            fn = getattr(prov, name, None)
+            if fn is None:
+                continue
+            try:
+                out = fn(text)
+                if asyncio.iscoroutine(out):
+                    out = self._run_async(out)
+            except Exception as e:
+                logger.warning("embedding provider %s 调用失败: %s", name, e)
+                continue
+            if isinstance(out, list) and out and all(
+                isinstance(x, (int, float)) for x in out
+            ):
+                return [float(x) for x in out]
+            if isinstance(out, np.ndarray):
+                arr = out.reshape(-1)
+                if arr.size and np.issubdtype(arr.dtype, np.number):
+                    return [float(x) for x in arr]
+        raise RuntimeError("embedding provider 返回了无法解析的向量")
+
+    def _probe(self):
+        self._provider = self._resolve_provider()
+        vec = self._call("astrbot")
+        if not vec:
+            raise RuntimeError("embedding provider 返回空向量")
+        self._dim = len(vec)
+
+    @property
+    def dim(self) -> int:
+        if self._dim is None:
+            raise RuntimeError("api embedder 尚未初始化维度")
+        return self._dim
+
+    def embed_text(self, text: str) -> np.ndarray:
+        vec = self._call(text)
+        return np.asarray(vec, dtype="float32")
+
+    def embed_image(self, image) -> np.ndarray:
+        raise NotImplementedError(
+            "api embedder 不支持图片编码；请使用 caption 文本向量（开启 vision caption）"
+        )
+
+    def close(self) -> None:
+        if self._loop is not None:
+            self._loop.call_soon_threadsafe(self._loop.stop)
+            self._loop_thread.join(timeout=2.0)
+        self._loop = None
+
 # -------------------- Factory --------------------
 
 class EmbedderFactory:
     _registry: dict[str, Type[BaseEmbedder]] = {
         "dummy": DummyEmbedder,
         "open_clip": OpenCLIPEmbedder,
+        "api": APIEmbedder,
     }
 
     @classmethod

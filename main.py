@@ -60,7 +60,7 @@ DEFAULT_PROMPT_TAIL_2 = (
     PLUGIN_NAME,
     "chiriu & 橘雪莉",
     "基于向量检索的智能表情包插件",
-    "0.4.1",
+    "0.5.0",
 )
 class VectorMemePlugin(Star):
     def __init__(self, context: Context, config: dict | None = None):
@@ -102,6 +102,9 @@ class VectorMemePlugin(Star):
         self._retriever: MemeRetriever | None = None
         self._captioner: CaptionGenerator | None = None
         self.caption_enabled = bool(self.config.get('enable_vision_caption', False))
+        if backend == "api":
+            # api 后端：图片不可直接编码，必须依赖 caption 文本向量
+            self.caption_enabled = True
         self._indexer_lock = asyncio.Lock()
 
         self._init_storage()
@@ -193,7 +196,11 @@ class VectorMemePlugin(Star):
                 random_jitter=float(self.config.get("selection_random_jitter", 0.015)),
             )
             if self.caption_enabled and hasattr(self._retriever, 'caption_weight'):
-                self._retriever.caption_weight = float(self.config.get('caption_score_weight', 0.6))
+                if self._backend_name == "api":
+                    # api 后端纯 caption 检索
+                    self._retriever.caption_weight = 1.0
+                else:
+                    self._retriever.caption_weight = float(self.config.get('caption_score_weight', 0.6))
             return self._embedder
 
     @staticmethod
@@ -217,6 +224,11 @@ class VectorMemePlugin(Star):
 
     def _embedder_kwargs(self) -> dict:
         """纯配置解析，不修改全局状态。env 变量在 _create() 内通过 _env_scope 临时设置。"""
+        if self._backend_name == "api":
+            return {
+                "context": self.context,
+                "provider_id": str(self.config.get("embedding_provider_id") or ""),
+            }
         if self._backend_name != "open_clip":
             return {}
         hf_endpoint = (self.config.get("hf_endpoint") or "").strip()

@@ -81,6 +81,43 @@ class DualRetriever(MemeRetriever):
                 out[mid] = float(sim)
         return out
 
+    def _caption_hits(
+        self,
+        cap_scores: dict[int, float],
+        topk: int,
+        fallback_used: bool = False,
+    ) -> list:
+        """纯 caption 路（api 后端）：按 caption 分数构造 MemeHit 列表。"""
+        order = sorted(cap_scores, key=cap_scores.get, reverse=True)[:max(int(topk), 0)]
+        if not order:
+            return []
+        with self.db._conn() as c:  # noqa: SLF001
+            placeholders = ",".join("?" * len(order))
+            rows = c.execute(
+                f"SELECT id, file_path, tag, usage_count, last_used_at, description "
+                f"FROM memes WHERE id IN ({placeholders})",
+                list(order),
+            ).fetchall()
+            meme_rows = {int(r["id"]): dict(r) for r in rows}
+        hits = []
+        for mid in order:
+            row = meme_rows.get(mid)
+            if row is None:
+                continue
+            raw = float(cap_scores[mid])
+            hits.append(MemeHit(
+                meme_id=mid,
+                file_path=row["file_path"],
+                tag=row["tag"],
+                similarity=raw,
+                raw_similarity=raw,
+                usage_count=row.get("usage_count", 0) or 0,
+                last_used_at=row.get("last_used_at"),
+                description=row.get("description"),
+                fallback_used=fallback_used,
+            ))
+        return hits
+
     @staticmethod
     def _minmax(scores: dict[int, float]) -> dict[int, float]:
         if not scores:
@@ -106,19 +143,35 @@ class DualRetriever(MemeRetriever):
             anti_repeat=anti_repeat,
             fallback_to_all_tags=fallback_to_all_tags,
         )
-        if not base.hits or self.caption_weight <= 0:
+        if self.caption_weight <= 0:
             return base
 
         # caption 候选集与图片路保持同一 tag 语义（fallback 同规则）
         cap_candidates = self._caption_candidates(tag)
+        cap_fallback = False
         if not cap_candidates and fallback_to_all_tags:
             cap_candidates = self._caption_candidates(None)
+            cap_fallback = True
         if not cap_candidates:
             return base
 
         query_vector = self.embedder.embed_text(self._build_query(text, tag))
         cap_scores = self._search_caption_path(query_vector, cap_candidates, topk)
         if not cap_scores:
+            return base
+
+        if not base.hits:
+            # api 后端：图片路无向量，检索结果完全来自 caption 路
+            base.hits = self._caption_hits(cap_scores, topk, fallback_used=cap_fallback)
+            base.used_fallback = cap_fallback
+            if base.hits:
+                self.db.log_search(
+                    query_text=text,
+                    tag_filter=base.original_tag,
+                    topk_ids=[h.meme_id for h in base.hits],
+                    selected_id=base.hits[0].meme_id,
+                    similarity=base.hits[0].similarity,
+                )
             return base
 
         w_cap = self.caption_weight

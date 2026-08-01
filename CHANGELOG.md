@@ -1,5 +1,20 @@
 # 更新日志
 
+## [0.5.0] - 2026-08-02
+
+### 新增
+- embedder_backend 新增 api 后端：调用 AstrBot 已配置的 Embedding 提供商（open_clip / api / dummy 三选一）
+- 新增配置 embedding_provider_id：指定 AstrBot Embedding 提供商 ID，留空自动用第一个可用提供商
+- api 后端强制开启 vision caption，检索走 caption 文本向量（纯文本检索），图片路向量留空
+
+### 行为
+- DualRetriever：图片路无向量（api 后端）时，检索结果完全来自 caption 路
+- 索引时 api 后端跳过图片编码（NotImplementedError 静默），不再误报嵌入失败
+
+### 限制
+- api 后端下 /vm 自动分类（prototype/KNN）不可用（依赖图片向量）
+- api 向量维度与 open_clip 不同，切换后需 /vm 重建索引
+
 ## [0.4.1] - 2026-08-02
 
 ### 配置面板分框

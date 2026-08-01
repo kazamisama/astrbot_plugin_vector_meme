@@ -73,12 +73,18 @@ pip install open_clip_torch torch
 
 如果只是想先跑通命令和索引流程，可以在配置中把 `embedder_backend` 改为 `dummy`。
 
+### 三种嵌入后端（embedder_backend）
+
+- `open_clip`（默认）：本地 OpenCLIP，图片+文本双模态语义向量
+- `api`：调用 AstrBot 已配置的 Embedding 提供商（文本 embedding）。**限制**：图片无法直接编码，必须搭配 vision caption（强制开启），检索走 caption 文本向量；切换后需 `/vm 重建`（向量维度不同）；`/vm 自动分类` 不可用
+- `dummy`：随机向量，仅测试链路
+
 ## 配置分组
 
 `_conf_schema.json` 已按用途分块（面板按卡片分组展示）：
 
 1. **基础路径与存储**：`meme_dir`、`data_dir`
-2. **模型与设备**：`embedder_backend`、设备、OpenCLIP 模型/权重/缓存、HF 镜像
+2. **模型与设备**：`embedder_backend`、`embedding_provider_id`、设备、OpenCLIP 模型/权重/缓存、HF 镜像
 3. **语义增强（vision caption）**：`enable_vision_caption`、`vision_provider_id`、caption 权重与批量
 4. **索引与标签**：子目录 tag、默认 tag
 5. **检索选择与反重复**：反重复窗口、采样池、随机扰动

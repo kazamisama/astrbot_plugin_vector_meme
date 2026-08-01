@@ -10,9 +10,10 @@
         "hint": "两种用法：① 留空 → 用插件自带的 memes/（独立，不影响 meme_manager）；② 填 meme_manager 的 memes 路径 → 直接联动，修改源会影响两边"
       },
       "data_dir": {
-        "description": "插件数据目录（存储数据库和 FAISS 索引），留空使用默认",
+        "description": "插件数据目录（数据库与 FAISS 索引），留空默认",
         "type": "string",
-        "default": ""
+        "default": "",
+        "hint": "存储数据库 memes.db 和 FAISS 索引；留空使用默认路径（AstrBot plugin_data/vector_meme）。换库/迁移时拷贝整个目录即可"
       }
     }
   },
@@ -26,9 +27,16 @@
         "default": "open_clip",
         "options": [
           "open_clip",
+          "api",
           "dummy"
         ],
-        "hint": "open_clip = OpenCLIP ViT-B-32（推荐）；dummy = 随机向量（仅用于测试）"
+        "hint": "open_clip = OpenCLIP ViT-B-32（推荐）；api = AstrBot Embedding 提供商（需开启 vision caption）；dummy = 随机向量（仅用于测试）"
+      },
+      "embedding_provider_id": {
+        "description": "AstrBot Embedding 提供商 ID",
+        "type": "string",
+        "default": "",
+        "hint": "填写 AstrBot「服务提供商」中已配置的 Embedding 提供商 ID；留空自动使用第一个可用提供商。仅 embedder_backend=api 时生效"
       },
       "device": {
         "description": "推理设备",
@@ -80,7 +88,7 @@
         "description": "启用 vision LLM 生成表情语义描述（caption），并参与双路向量检索",
         "type": "bool",
         "default": false,
-        "hint": "需要 AstrBot 配置了支持图片输入的视觉模型；开启后索引/重建会自动补 caption，也可用 /vm caption 手动补"
+        "hint": "需要 AstrBot 配置了支持图片输入的视觉模型；开启后索引/重建会自动补 caption，也可用 /vm caption 手动补。embedder_backend=api 时强制开启"
       },
       "vision_provider_id": {
         "description": "用于生成 caption 的视觉模型 provider ID（留空则禁用 caption）",
@@ -90,7 +98,8 @@
       "caption_score_weight": {
         "description": "双路检索中 caption 文本向量权重（0-1，其余为图片向量权重）",
         "type": "float",
-        "default": 0.6
+        "default": 0.6,
+        "hint": "embedder_backend=api 时固定为 1.0（纯 caption 检索）"
       },
       "caption_batch_limit": {
         "description": "单次 caption 补全最大处理张数",

@@ -31,5 +31,5 @@ help: |
     配合 XML 结构化输出插件时，也可输出 <sticker>happy</sticker> 标记，
     由 XML 插件经 search_sticker_for_external() 转发取图。
     默认不使用 &&tag&&，避免和 meme_manager 冲突。
-version: 0.4.1
+version: 0.5.0
 author: chiriu & 橘雪莉

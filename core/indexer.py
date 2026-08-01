@@ -83,6 +83,9 @@ def _embed_one(embedder: BaseEmbedder, path: Path) -> "object | None":
             if getattr(img, "is_animated", False):
                 img.seek(0)
             return embedder.embed_image(img.convert("RGB"))
+    except NotImplementedError:
+        # api 后端：图片不可直接编码，主向量留空（由调用方按 skipped 统计，检索走 caption 路）
+        raise
     except Exception as e:
         logger.warning("嵌入失败 %s: %s", path, e)
         return None
@@ -212,7 +215,15 @@ class MemeIndexer:
             meta_batch.clear()
 
         for p in to_embed:
-            vec = _embed_one(self.embedder, p)
+            try:
+                vec = _embed_one(self.embedder, p)
+            except NotImplementedError:
+                # api 后端：图片不可直接编码，主向量留空，检索走 caption 路
+                progress.skipped += 1
+                progress.done += 1
+                if progress.on_progress:
+                    progress.on_progress(progress.done, progress.total, p)
+                continue
             if vec is None:
                 progress.failed += 1
                 self.db.log_index_action("add", str(p), "failed", "嵌入失败")
