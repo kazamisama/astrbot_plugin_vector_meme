@@ -1,5 +1,13 @@
 # 更新日志
 
+## [0.6.0] - 2026-08-02
+
+### 新增
+- caption 固化分发：新增 `/vm caption 导出`，把 DB 中已有 caption 导出为 `memes/captions.json`（key=相对路径，随表情库进 git）
+- 索引/重建/修复时优先复用 `memes/captions.json` 中的 caption（`external_captions`），只编码向量、不调视觉模型
+- 表情库固定时：本地跑一次 `/vm caption` + `/vm caption 导出` 推送后，客户端无需视觉模型即可建立 caption 向量
+- `_enrich_captions_after_index`：vision provider 不可用但存在 captions.json 时仍可完成 caption 向量构建
+
 ## [0.5.0] - 2026-08-02
 
 ### 新增

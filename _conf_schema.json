@@ -30,7 +30,7 @@
           "api",
           "dummy"
         ],
-        "hint": "open_clip = OpenCLIP ViT-B-32（推荐）；api = AstrBot Embedding 提供商（需开启 vision caption）；dummy = 随机向量（仅用于测试）"
+        "hint": "open_clip = OpenCLIP ViT-B-32（推荐）；api = AstrBot Embedding 提供商（需开启 vision caption）；dummy = 随机向量（仅用于测试）。换模型架构后向量维度会变（ViT-B-32=512、ViT-L-14=768），需 /vm 重建"
       },
       "embedding_provider_id": {
         "description": "AstrBot Embedding 提供商 ID",
@@ -67,10 +67,10 @@
         "hint": "指向本地 open_clip_pytorch_model.bin 文件，可绕开 HF 网络问题。需要先手动下载权重到本地"
       },
       "open_clip_cache_dir": {
-        "description": "OpenCLIP / HuggingFace 模型缓存目录，留空使用插件 models/cache",
+        "description": "OpenCLIP 模型缓存目录，留空用默认",
         "type": "string",
         "default": "",
-        "hint": "可填绝对路径。用于避免每次重新下载模型权重"
+        "hint": "OpenCLIP / HuggingFace 模型权重缓存目录；留空使用插件 models/cache。可填绝对路径，避免每次重新下载模型权重"
       },
       "hf_endpoint": {
         "description": "HuggingFace 镜像地址，用于 OpenCLIP 权重下载",

@@ -60,7 +60,7 @@ DEFAULT_PROMPT_TAIL_2 = (
     PLUGIN_NAME,
     "chiriu & 橘雪莉",
     "基于向量检索的智能表情包插件",
-    "0.5.0",
+    "0.6.0",
 )
 class VectorMemePlugin(Star):
     def __init__(self, context: Context, config: dict | None = None):
@@ -263,17 +263,64 @@ class VectorMemePlugin(Star):
             )
         return self._captioner
 
+    def _load_external_captions(self) -> dict:
+        """读取 memes/captions.json（key=相对 meme_dir 路径），转成 {绝对路径: caption}。"""
+        path = Path(__file__).resolve().parent / "memes" / "captions.json"
+        if not path.exists():
+            return {}
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except Exception as e:
+            logger.warning(f"[{PLUGIN_NAME}] captions.json 读取失败: {e}")
+            return {}
+        if not isinstance(data, dict):
+            return {}
+        meme_dir = self.meme_dir
+        out: dict = {}
+        for rel, cap in data.items():
+            try:
+                abs_path = str((meme_dir / str(rel)).resolve())
+            except Exception:
+                continue
+            caption_text = str(cap or "").strip()
+            if caption_text:
+                out[abs_path] = caption_text
+        return out
+
+    def _export_captions(self) -> int:
+        """把 DB 中已有 caption 导出到 memes/captions.json（key=相对 meme_dir 路径）。"""
+        if self._db is None:
+            return 0
+        rows = self._db.list_memes(limit=10_000_000)
+        meme_dir = self.meme_dir
+        out: dict = {}
+        for r in rows:
+            cap = (r.get("caption") or "").strip()
+            if not cap:
+                continue
+            try:
+                rel = Path(r["file_path"]).resolve().relative_to(meme_dir.resolve())
+            except (ValueError, OSError):
+                continue
+            out[rel.as_posix()] = cap
+        out = dict(sorted(out.items()))
+        path = Path(__file__).resolve().parent / "memes" / "captions.json"
+        path.write_text(json.dumps(out, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        return len(out)
+
     async def _enrich_captions_after_index(self) -> dict:
         try:
             captioner = self._ensure_captioner()
-            if not captioner.available():
-                logger.warning(f'[{PLUGIN_NAME}] vision caption enabled but provider unavailable')
+            external = self._load_external_captions()
+            if not captioner.available() and not external:
+                logger.warning(f'[{PLUGIN_NAME}] vision caption enabled but provider unavailable（且无 captions.json 可复用）')
                 return {}
             result = await enrich_meme_captions(
                 self._db,
                 self._embedder,
                 captioner,
                 limit=int(self.config.get('caption_batch_limit', 500)),
+                external_captions=external,
             )
             self._db.save_index()
             return result
@@ -1094,6 +1141,10 @@ class VectorMemePlugin(Star):
     async def _cmd_caption(self, event: AstrMessageEvent, rest: list[str]):
         if not self.caption_enabled:
             yield event.plain_result('vision caption disabled (enable_vision_caption=false)')
+            return
+        if rest and rest[0] in ("导出", "export"):
+            count = self._export_captions()
+            yield event.plain_result(f'已导出 {count} 条 caption 到 memes/captions.json')
             return
         ready = await self._ensure_ready()
         if not ready:

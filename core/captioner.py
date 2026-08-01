@@ -118,6 +118,7 @@ async def enrich_meme_captions(
     limit: int = 200,
     batch_size: int = 16,
     progress_cb=None,
+    external_captions: dict[str, str] | None = None,
 ) -> dict:
     """Generate captions for memes lacking one and store their caption vectors.
 
@@ -129,6 +130,8 @@ async def enrich_meme_captions(
         limit: maximum number of memes processed in one run.
         batch_size: vectors per FAISS batch write.
         progress_cb: optional callable(done, total).
+        external_captions: {absolute_file_path: caption_text}，优先复用
+            已固化的 caption（如 memes/captions.json），不调视觉模型。
 
     Returns:
         {'total': int, 'ok': int, 'failed': int}
@@ -163,17 +166,24 @@ async def enrich_meme_captions(
         done += 1
         if progress_cb:
             progress_cb(done, total)
-        result = await captioner.caption_image(row['file_path'])
-        if not result:
-            failed += 1
-            continue
-        caption_text = str(result.get('caption') or '').strip()
-        keywords = str(result.get('en_keywords') or '').strip()
-        if not caption_text:
-            failed += 1
-            continue
-        if keywords:
-            caption_text = caption_text + ' ' + keywords
+        caption_text = ""
+        if external_captions:
+            caption_text = str(external_captions.get(row['file_path']) or '').strip()
+        if caption_text:
+            # 复用已固化 caption，跳过视觉模型调用
+            keywords = ""
+        else:
+            result = await captioner.caption_image(row['file_path'])
+            if not result:
+                failed += 1
+                continue
+            caption_text = str(result.get('caption') or '').strip()
+            keywords = str(result.get('en_keywords') or '').strip()
+            if not caption_text:
+                failed += 1
+                continue
+            if keywords:
+                caption_text = caption_text + ' ' + keywords
         try:
             vector = await asyncio.to_thread(embedder.embed_text, caption_text)
         except Exception as exc:

@@ -77,6 +77,12 @@ pip install open_clip_torch torch
 
 - `open_clip`（默认）：本地 OpenCLIP，图片+文本双模态语义向量
 - `api`：调用 AstrBot 已配置的 Embedding 提供商（文本 embedding）。**限制**：图片无法直接编码，必须搭配 vision caption（强制开启），检索走 caption 文本向量；切换后需 `/vm 重建`（向量维度不同）；`/vm 自动分类` 不可用
+
+### caption 固化分发（减少视觉模型调用）
+
+- 本地跑一次 `/vm caption`（生成全部 caption，消耗一次视觉模型成本）→ `/vm caption 导出`（写入 `memes/captions.json`）→ 随表情库推送
+- 客户端索引/重建时自动复用 `memes/captions.json`：只用自己的 embedder 编码 caption 向量，**不再调用视觉模型**
+- 未推送 captions.json 时行为不变（依赖 `vision_provider_id` 现场生成）
 - `dummy`：随机向量，仅测试链路
 
 ## 配置分组
