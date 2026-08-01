@@ -24,9 +24,8 @@ data/
 *.sqlite3
 *.faiss
 
-# Local meme library and model weights
+# Local model weights
 # These can be large and/or private. Use README instructions to copy/configure them locally.
-/memes/
 /models/
 *.bin
 *.pt

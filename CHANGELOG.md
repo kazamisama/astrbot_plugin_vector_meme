@@ -1,5 +1,16 @@
 # 更新日志
 
+## [0.4.0] - 2026-08-01
+
+### 标签体系 v2（tag 体系重做）
+- 表情库替换：memes/ 由 22 目录（398 张）整体替换为 emoji 库 17 目录（191 张）
+- 17 标签三分类：emotion（10）/ social_action（4）/ context_meme（3）
+- tag_schema.json 重写 v2：每条含 category / meaning / visual_features / exclude / color
+- moew 改名为 meow
+- 索引/修复时按 tag_schema 同步 tags 表 description/category/color，persona 注入自动带出新定义
+- /vm 修复、/vm 重建 自动清理 schema 外且无表情引用的残留 tag
+- memes/ 表情库纳入 git 跟踪，便于迁移
+
 ## [0.3.0] - 2026-08-01
 
 ### 新增

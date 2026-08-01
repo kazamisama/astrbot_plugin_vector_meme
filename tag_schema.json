@@ -1,116 +1,259 @@
 {
-  "version": 1,
-  "description": "vector_meme tag schema. 用于统一标签含义、提示注入、人工标注和自动分类校准。",
+  "version": 2,
+  "description": "vector_meme tag schema v2：17 标签、三分类（emotion/social_action/context_meme）。meaning 含群氛围匹配提示（emotion 类），用于 LLM 标签注入、人工标注与检索提示。",
   "tags": {
-    "angry": {
-      "meaning": "生气、不满、炸毛、强烈吐槽",
-      "visual_features": ["皱眉", "怒视", "红脸或火气", "拍桌/指责姿态"],
-      "exclude": ["普通嫌弃", "轻微吐槽", "哭泣"]
-    },
-    "baka": {
-      "meaning": "笨蛋、轻微嫌弃、吐槽对方犯蠢",
-      "visual_features": ["半月眼", "无语表情", "指责或吐槽姿态"],
-      "exclude": ["真实愤怒", "害羞", "哭泣"]
-    },
-    "color": {
-      "meaning": "涩涩、颜色、暧昧或成人向暗示",
-      "visual_features": ["暧昧姿态", "脸红", "诱惑构图"],
-      "exclude": ["普通害羞", "单纯开心"]
-    },
-    "confused": {
-      "meaning": "疑惑、困惑、没听懂、脑袋空空",
-      "visual_features": ["歪头", "问号感", "呆滞", "困惑眼神"],
-      "exclude": ["震惊", "思考", "悲伤"]
-    },
-    "cpu": {
-      "meaning": "CPU 过载、脑袋烧了、思考宕机",
-      "visual_features": ["冒烟", "大脑过载", "呆住", "崩溃感"],
-      "exclude": ["普通困惑", "工作状态"]
-    },
-    "cry": {
-      "meaning": "哭泣、委屈、破防、眼泪明显",
-      "visual_features": ["眼泪", "哭脸", "抽泣", "委屈姿态"],
-      "exclude": ["轻微难过", "撒娇害羞"]
-    },
-    "fool": {
-      "meaning": "傻眼、搞怪、笨拙或自嘲",
-      "visual_features": ["滑稽", "呆萌", "夸张表情"],
-      "exclude": ["明确骂人", "愤怒"]
-    },
-    "givemoney": {
-      "meaning": "要钱、打钱、交易、求投喂",
-      "visual_features": ["钱", "伸手", "付款暗示", "求打赏"],
-      "exclude": ["普通喜欢", "感谢"]
-    },
     "happy": {
-      "meaning": "开心、高兴、愉快、轻松正反馈",
-      "visual_features": ["笑脸", "明亮表情", "活泼动作"],
-      "exclude": ["恋爱心动", "惊讶", "得意嘲讽"]
+      "category": "emotion",
+      "meaning": "开心、高兴、愉快、轻松正反馈。群氛围活跃/愉悦时优先使用。",
+      "visual_features": [
+        "笑脸",
+        "明亮表情",
+        "活泼动作"
+      ],
+      "exclude": [
+        "恋爱心动",
+        "惊讶",
+        "得意嘲讽",
+        "爆笑"
+      ],
+      "color": "#FFD54F"
+    },
+    "laugh": {
+      "category": "emotion",
+      "meaning": "画面是“笑”的善意搞笑图（大笑/笑哭/咧嘴），负责搞笑接梗归类，不绑定情绪场景；有梗、需要搞笑反应图时用。",
+      "visual_features": [
+        "大笑",
+        "笑哭",
+        "咧嘴"
+      ],
+      "exclude": [
+        "冷笑/坏笑/嘲讽",
+        "心动",
+        "高兴愉悦"
+      ],
+      "color": "#FFB74D"
     },
     "heart": {
-      "meaning": "爱心、心动、喜欢、亲密正反馈",
-      "visual_features": ["爱心", "心形符号", "甜蜜氛围"],
-      "exclude": ["普通开心", "点赞"]
-    },
-    "like": {
-      "meaning": "赞同、点赞、认可、干得好",
-      "visual_features": ["点赞手势", "肯定表情", "鼓励姿态"],
-      "exclude": ["心动", "普通开心"]
-    },
-    "meow": {
-      "meaning": "猫猫、喵、卖萌、轻微撒娇",
-      "visual_features": ["猫耳", "猫爪", "喵叫", "猫化姿态"],
-      "exclude": ["普通害羞", "强烈亲密"]
-    },
-    "morning": {
-      "meaning": "早安、起床、清晨问候",
-      "visual_features": ["早晨", "起床", "问候文字", "睡醒"],
-      "exclude": ["睡觉中", "晚安"]
-    },
-    "reply": {
-      "meaning": "回复、收到、回应对方消息",
-      "visual_features": ["回话", "应答", "收到提示"],
-      "exclude": ["单纯看见", "点赞"]
-    },
-    "sad": {
-      "meaning": "难过、低落、失落，但不一定流泪",
-      "visual_features": ["低头", "沮丧", "暗淡表情"],
-      "exclude": ["明显哭泣", "生气"]
-    },
-    "see": {
-      "meaning": "看、观察、偷窥、盯着",
-      "visual_features": ["盯", "探头", "看屏幕", "观察姿态"],
-      "exclude": ["震惊", "疑惑"]
+      "category": "emotion",
+      "meaning": "广义爱心：喜欢、心动、爱了，对内容/人/氛围的情感偏好（“我好喜欢这个”）；恋爱话题、被击中时用。",
+      "visual_features": [
+        "爱心眼",
+        "红心",
+        "捧脸"
+      ],
+      "exclude": [
+        "表态赞同",
+        "害羞",
+        "感谢"
+      ],
+      "color": "#F48FB1"
     },
     "shy": {
-      "meaning": "害羞、脸红、不好意思、轻微心动",
-      "visual_features": ["脸红", "躲闪视线", "扭捏", "不好意思"],
-      "exclude": ["成人向暧昧", "哭泣", "普通开心"]
+      "category": "emotion",
+      "meaning": "反应型害羞：被夸、被撩、被点名时的脸红不好意思；夸夸/恋爱氛围下优先。",
+      "visual_features": [
+        "脸红",
+        "捂脸",
+        "低头",
+        "躲闪"
+      ],
+      "exclude": [
+        "心动",
+        "盯人"
+      ],
+      "color": "#F8BBD0"
     },
-    "sigh": {
-      "meaning": "叹气、无奈、疲惫、算了",
-      "visual_features": ["叹气", "扶额", "疲惫眼神", "无奈动作"],
-      "exclude": ["生气", "悲伤哭泣"]
+    "angry": {
+      "category": "emotion",
+      "meaning": "生气+敌意：火气、不满，含冷笑/坏笑/嘲讽/翻白眼等攻击性表达；被冒犯、被挑衅、意见不合时用。",
+      "visual_features": [
+        "火气",
+        "炸毛",
+        "皱眉",
+        "怒目",
+        "冷笑"
+      ],
+      "exclude": [
+        "伤心低落",
+        "委屈哭",
+        "笨蛋呆"
+      ],
+      "color": "#E57373"
     },
-    "sleep": {
-      "meaning": "睡觉、困了、晚安、休息",
-      "visual_features": ["睡姿", "闭眼", "被窝", "困倦"],
-      "exclude": ["早安", "昏迷崩溃"]
+    "sad": {
+      "category": "emotion",
+      "meaning": "压抑型低落：伤心、沮丧、委屈但没哭出来，垂头丧气；群氛围低落、被打击时用。",
+      "visual_features": [
+        "垂头",
+        "低气压",
+        "无神",
+        "抱膝",
+        "叹气"
+      ],
+      "exclude": [
+        "落泪崩溃",
+        "生气"
+      ],
+      "color": "#90CAF9"
+    },
+    "cry": {
+      "category": "emotion",
+      "meaning": "破防通用：哭出来、崩溃、泪目，难过哭与感动泪目都收；被虐到、破防、被感动时用。",
+      "visual_features": [
+        "落泪",
+        "大哭",
+        "崩溃",
+        "哭唧唧"
+      ],
+      "exclude": [
+        "忍住不哭",
+        "生气"
+      ],
+      "color": "#64B5F6"
     },
     "surprised": {
-      "meaning": "惊讶、震惊、吓到、意外",
-      "visual_features": ["瞪大眼", "张嘴", "惊吓姿态", "强烈反应"],
-      "exclude": ["普通疑惑", "开心"]
+      "category": "emotion",
+      "meaning": "刺激型震惊：被意外冲击的即时反应（瞳孔地震）；突发、反转、意外消息时用。",
+      "visual_features": [
+        "瞪眼",
+        "张嘴",
+        "呆住"
+      ],
+      "exclude": [
+        "困惑"
+      ],
+      "color": "#FFAB91"
     },
-    "think": {
-      "meaning": "思考、推理、琢磨、分析",
-      "visual_features": ["托腮", "沉思", "思考姿态"],
-      "exclude": ["CPU 过载", "疑惑"]
+    "confused": {
+      "category": "emotion",
+      "meaning": "纯困惑+神奇发言：想不通、搞不懂、一脸问号，对方说了莫名其妙的话也走这条。",
+      "visual_features": [
+        "歪头",
+        "问号",
+        "挠头",
+        "呆滞"
+      ],
+      "exclude": [
+        "惊讶",
+        "无语嫌弃"
+      ],
+      "color": "#A1887F"
     },
-    "work": {
-      "meaning": "工作、忙碌、加班、处理任务",
-      "visual_features": ["电脑", "办公", "忙碌", "工作场景"],
-      "exclude": ["CPU 崩溃", "睡觉"]
+    "baka": {
+      "category": "emotion",
+      "meaning": "呆萌犯傻：笨蛋、傻乎乎，说别人傻或自嘲犯蠢都可用；犯蠢时刻、蠢萌反应。",
+      "visual_features": [
+        "呆滞",
+        "犯傻",
+        "蠢萌"
+      ],
+      "exclude": [
+        "困惑",
+        "生气嘲讽"
+      ],
+      "color": "#CE93D8"
+    },
+    "like": {
+      "category": "social_action",
+      "meaning": "纯赞同表态：+1、说得对、支持你；理性表态，不含情感性喜欢；好耶/不错这类轻量正反馈归 happy。",
+      "visual_features": [
+        "竖大拇指",
+        "点赞",
+        "点头"
+      ],
+      "exclude": [
+        "情感喜欢",
+        "感谢"
+      ],
+      "color": "#81C784"
+    },
+    "thanks": {
+      "category": "social_action",
+      "meaning": "礼数感谢全收：鞠躬、合十、递茶、比心等表达谢意的画面；求人办事、被帮助后的回应。",
+      "visual_features": [
+        "鞠躬",
+        "双手合十",
+        "递茶",
+        "比心"
+      ],
+      "exclude": [
+        "赞同",
+        "心动"
+      ],
+      "color": "#AED581"
+    },
+    "see": {
+      "category": "social_action",
+      "meaning": "暗中观察/吃瓜：“我看看你在干嘛”的围观心态，吃瓜、监视、盯梢。",
+      "visual_features": [
+        "眼睛特写",
+        "盯视",
+        "暗中观察"
+      ],
+      "exclude": [
+        "害羞",
+        "困惑",
+        "惊讶"
+      ],
+      "color": "#4DB6AC"
+    },
+    "meow": {
+      "category": "social_action",
+      "meaning": "猫系+萌系通用：画面有猫或明显卖萌撒娇姿态都收；“喵”“蹭蹭”求关注求抚摸。",
+      "visual_features": [
+        "猫",
+        "猫耳",
+        "蹭蹭",
+        "打滚",
+        "眨眼"
+      ],
+      "exclude": [
+        "害羞",
+        "心动"
+      ],
+      "color": "#FFCC80"
+    },
+    "morning": {
+      "category": "context_meme",
+      "meaning": "早安问候为主：早安、新的一天开始，早上打招呼的场景；没睡醒/起床气归 sleep。",
+      "visual_features": [
+        "太阳",
+        "闹钟",
+        "伸懒腰",
+        "早安文案"
+      ],
+      "exclude": [
+        "困倦"
+      ],
+      "color": "#FFF59D"
+    },
+    "sleep": {
+      "category": "context_meme",
+      "meaning": "晚安+困倦全收：道晚安、想睡、打哈欠、没睡醒、起床气；晚上道晚安或白天犯困时用。",
+      "visual_features": [
+        "月亮",
+        "睡觉",
+        "打哈欠",
+        "晚安文案"
+      ],
+      "exclude": [
+        "早安"
+      ],
+      "color": "#7986CB"
+    },
+    "kfc": {
+      "category": "context_meme",
+      "meaning": "纯 KFC 玩梗：疯狂星期四、V我50，星期四群氛围玩梗时优先；纯梗类无情绪维度。",
+      "visual_features": [
+        "KFC logo",
+        "炸鸡",
+        "疯狂星期四文案"
+      ],
+      "exclude": [
+        "其他乞讨/要钱梗",
+        "食物图"
+      ],
+      "color": "#FF8A65"
     }
   }
 }

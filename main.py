@@ -25,6 +25,7 @@ from astrbot.api.star import Context, Star, register
 from astrbot.core.message.message_event_result import MessageChain
 
 from .core import BaseEmbedder, EmbedderFactory, MemeDatabase, MemeIndexer, MemeRetriever
+from .core.indexer import tag_meta
 from .core.captioner import CaptionGenerator, enrich_meme_captions
 from .core.retriever_dual import DualRetriever
 from .core.indexer import IndexProgress
@@ -59,7 +60,7 @@ DEFAULT_PROMPT_TAIL_2 = (
     PLUGIN_NAME,
     "chiriu & 橘雪莉",
     "基于向量检索的智能表情包插件",
-    "0.2.0",
+    "0.4.0",
 )
 class VectorMemePlugin(Star):
     def __init__(self, context: Context, config: dict | None = None):
@@ -168,6 +169,7 @@ class VectorMemePlugin(Star):
                 self._db, self._embedder,
                 use_subdir_as_tag=bool(self.config.get("use_subdir_as_tag", True)),
                 default_tag=self.config.get("default_tag", "misc"),
+                tag_schema=self._load_tag_schema(),
             )
             retriever_cls = DualRetriever if self.caption_enabled else MemeRetriever
             self._retriever = retriever_cls(
@@ -646,7 +648,8 @@ class VectorMemePlugin(Star):
                 await asyncio.wait_for(reporter_task, timeout=3.0)
             except asyncio.TimeoutError:
                 reporter_task.cancel()
-        # 重建完成 → 标签列表已变 → 重新注入
+        # 重建完成 → 标签列表已变 → 同步 schema 并清理残留 → 重新注入
+        self._sync_tag_registry(indexer.db)
         self._inject_into_personas()
         yield event.plain_result(
             f"重建完成，共处理 {progress.total} 张（新增 {progress.added}）"
@@ -834,6 +837,35 @@ class VectorMemePlugin(Star):
                     lines.append(f"  {item}")
         yield event.plain_result("\n".join(lines))
 
+    def _load_tag_schema(self) -> dict:
+        """读取插件自带 tag_schema.json，返回 tags dict；失败返回空 dict。"""
+        schema_path = Path(__file__).resolve().parent / "tag_schema.json"
+        try:
+            data = json.loads(schema_path.read_text(encoding="utf-8"))
+            tags = data.get("tags", data)
+            return tags if isinstance(tags, dict) else {}
+        except Exception as e:
+            logger.warning(f"[{PLUGIN_NAME}] tag_schema 读取失败: {e}")
+            return {}
+
+    def _sync_tag_registry(self, db) -> int:
+        """按 tag_schema 同步 tags 表：schema 内 upsert 全字段，schema 外且无 meme 引用的残留 tag 删除。返回清理数。"""
+        schema_tags = self._load_tag_schema()
+        if not schema_tags:
+            return 0
+        for name, item in schema_tags.items():
+            if not isinstance(item, dict):
+                continue
+            meta = tag_meta(name, schema_tags)
+            db.upsert_tag(name, description=meta["description"], category=meta["category"], color=meta["color"])
+        active = set(db.count_by_tag().keys())
+        with db._conn() as c:  # noqa: SLF001 - 受控内部访问
+            rows = c.execute("SELECT name FROM tags").fetchall()
+            stale = [r["name"] for r in rows if r["name"] not in schema_tags and r["name"] not in active]
+            for name in stale:
+                c.execute("DELETE FROM tags WHERE name = ?", (name,))
+        return len(stale)
+
     async def _cmd_repair(self, event: AstrMessageEvent, rest: list[str]):
         """轻量修复：清理缺失文件记录、注册缺失 tag、刷新 prompt。"""
         ready = await self._ensure_ready()
@@ -845,8 +877,7 @@ class VectorMemePlugin(Star):
             lambda: indexer.remove_missing(self.meme_dir)
         )
         counts = db.count_by_tag()
-        for tag in counts:
-            db.upsert_tag(tag)
+        stale_tags = self._sync_tag_registry(db)
         self._inject_into_personas()
         if self.caption_enabled:
             caption_result = await self._enrich_captions_after_index()
@@ -855,7 +886,7 @@ class VectorMemePlugin(Star):
                     'caption: total={total}, ok={ok}, failed={failed}'.format(**caption_result)
                 )
         yield event.plain_result(
-            f"修复完成\n- 清理缺失文件记录: {removed}\n- 注册/确认 tag: {len(counts)}\n- 已刷新 prompt"
+            f"修复完成\n- 清理缺失文件记录: {removed}\n- 注册/确认 tag: {len(counts)}\n- 清理残留 tag: {stale_tags}\n- 已刷新 prompt"
         )
 
     async def _cmd_auto_classify(self, event: AstrMessageEvent, rest: list[str]):

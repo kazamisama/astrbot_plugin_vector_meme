@@ -27,6 +27,30 @@ logger = logging.getLogger(__name__)
 SUPPORTED_EXT = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp"}
 
 
+def tag_description(item: dict) -> str:
+    """把 schema 单条定义拼成 DB description（persona 注入用）。"""
+    parts = [str(item.get("meaning") or "")]
+    visual = item.get("visual_features") or []
+    exclude = item.get("exclude") or []
+    if visual:
+        parts.append("画面特征：" + "、".join(str(v) for v in visual))
+    if exclude:
+        parts.append("排除：" + "、".join(str(e) for e in exclude))
+    return "；".join(p for p in parts if p)
+
+
+def tag_meta(tag: str, schema: dict) -> dict:
+    """从 schema 取 tag 的 (description, category, color)，缺省为空串。"""
+    item = schema.get(tag) or {}
+    if not isinstance(item, dict):
+        return {"description": "", "category": "", "color": ""}
+    return {
+        "description": tag_description(item),
+        "category": str(item.get("category") or ""),
+        "color": str(item.get("color") or ""),
+    }
+
+
 def iter_image_files(root: Path, recursive: bool = True) -> Iterable[Path]:
     """遍历目录里的图片文件。"""
     root = Path(root)
@@ -90,11 +114,13 @@ class MemeIndexer:
         embedder: BaseEmbedder,
         use_subdir_as_tag: bool = True,
         default_tag: str = "misc",
+        tag_schema: dict | None = None,
     ):
         self.db = db
         self.embedder = embedder
         self.use_subdir_as_tag = use_subdir_as_tag
         self.default_tag = default_tag
+        self.tag_schema = tag_schema or {}
 
     def _resolve_tag(self, file_path: Path, root: Path) -> str:
         if not self.use_subdir_as_tag:
@@ -164,7 +190,7 @@ class MemeIndexer:
             for path, vid in zip(meta_batch, v_ids):
                 fhash, w, h, size, _ = file_meta[path]
                 tag = self._resolve_tag(path, root)
-                self.db.upsert_tag(tag)
+                self.db.upsert_tag(tag, **tag_meta(tag, self.tag_schema))
                 is_update = str(path) in existing
                 self.db.upsert_meme(
                     file_path=str(path),
