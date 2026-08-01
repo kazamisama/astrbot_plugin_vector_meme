@@ -355,7 +355,7 @@ class VectorMemePlugin(Star):
         async for result in self._dispatch_command(event, args):
             yield result
 
-    @filter.command("表情向量", alias={"vmem"})
+    @filter.command("表情向量", alias={"vmem", "vm"})
     async def vm_command(self, event: AstrMessageEvent, *args: str):
         """vector_meme 统一入口。"""
         async for result in self._dispatch_command(event, list(args)):

@@ -10,6 +10,7 @@
 - 索引/修复时按 tag_schema 同步 tags 表 description/category/color，persona 注入自动带出新定义
 - /vm 修复、/vm 重建 自动清理 schema 外且无表情引用的残留 tag
 - memes/ 表情库纳入 git 跟踪，便于迁移
+- 修复：命令注册补充 vm alias，`/vm` 前缀命令可用（此前仅 `表情向量`/`vmem`）
 
 ## [0.3.0] - 2026-08-01
 
