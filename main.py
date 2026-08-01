@@ -30,6 +30,13 @@ from .core.captioner import CaptionGenerator, enrich_meme_captions
 from .core.retriever_dual import DualRetriever
 from .core.indexer import IndexProgress
 
+try:
+    # AstrBot v4.25.5：命令 handler 剩余参数按 GreedyStr 注解聚合为完整字符串
+    from astrbot.core.star.filter.command import GreedyStr as _CmdGreedyStr
+except Exception:
+    # 旧版 AstrBot 兜底：按普通 str 处理（仅接收第一个参数）
+    _CmdGreedyStr = str
+
 PLUGIN_NAME = "vector_meme"
 
 # 默认占位符格式：%%<tag>%%
@@ -60,7 +67,7 @@ DEFAULT_PROMPT_TAIL_2 = (
     PLUGIN_NAME,
     "chiriu & 橘雪莉",
     "基于向量检索的智能表情包插件",
-    "0.6.1",
+    "0.6.2",
 )
 class VectorMemePlugin(Star):
     def __init__(self, context: Context, config: dict | None = None):
@@ -422,15 +429,20 @@ class VectorMemePlugin(Star):
             args = []
         elif text.startswith("vmem "):
             args = text.split()[1:]
+        elif text == "vm":
+            args = []
+        elif text.startswith("vm "):
+            args = text.split()[1:]
         else:
             return
         async for result in self._dispatch_command(event, args):
             yield result
 
     @filter.command("表情向量", alias={"vmem", "vm"})
-    async def vm_command(self, event: AstrMessageEvent, *args: str):
-        """vector_meme 统一入口。"""
-        async for result in self._dispatch_command(event, list(args)):
+    async def vm_command(self, event: AstrMessageEvent, args: _CmdGreedyStr):
+        """vector_meme 统一入口（AstrBot 命令通道，GreedyStr 接收全部剩余参数）。"""
+        rest = str(args or "").split()
+        async for result in self._dispatch_command(event, rest):
             yield result
 
     async def _cmd_prewarm(self, event: AstrMessageEvent, rest: list[str]):

@@ -1,5 +1,11 @@
 # 更新日志
 
+## [0.6.2] - 2026-08-02
+
+### 修复
+- /vm 命令通道适配 AstrBot v4.25.5：handler 改用 GreedyStr 接收全部剩余参数，修复 `vm_command() got an unexpected keyword argument 'args'`
+- 文本监听补充 `vm` 前缀（无参数 /vm 也可用）
+
 ## [0.6.1] - 2026-08-02
 
 ### 改进
