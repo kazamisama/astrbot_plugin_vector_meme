@@ -35,10 +35,12 @@ CREATE TABLE IF NOT EXISTS memes (
     tag TEXT NOT NULL,
     sub_tags TEXT,
     description TEXT,
+    caption TEXT,
     width INTEGER,
     height INTEGER,
     file_size INTEGER,
     vector_id INTEGER NOT NULL,
+    caption_vector_id INTEGER,
     usage_count INTEGER DEFAULT 0,
     last_used_at REAL,
     disabled INTEGER DEFAULT 0,
@@ -107,6 +109,11 @@ class MemeDatabase:
     def _init_db(self) -> None:
         with self._conn() as c:
             c.executescript(SCHEMA)
+            cols = {row[1] for row in c.execute('PRAGMA table_info(memes)')}
+            if 'caption' not in cols:
+                c.execute('ALTER TABLE memes ADD COLUMN caption TEXT')
+            if 'caption_vector_id' not in cols:
+                c.execute('ALTER TABLE memes ADD COLUMN caption_vector_id INTEGER')
 
     @contextmanager
     def _conn(self) -> Iterator[sqlite3.Connection]:
@@ -226,6 +233,26 @@ class MemeDatabase:
                 ),
             )
             return cur.lastrowid
+
+    def set_meme_caption(
+        self,
+        meme_id: int,
+        caption: str | None,
+        caption_vector_id: int | None = None,
+    ) -> None:
+        with self._conn() as c:
+            c.execute(
+                'UPDATE memes SET caption = ?, caption_vector_id = ? WHERE id = ?',
+                (caption, caption_vector_id, int(meme_id)),
+            )
+
+    def memes_without_caption(self, limit: int = 500) -> list[dict]:
+        with self._conn() as c:
+            rows = c.execute(
+                'SELECT id, file_path FROM memes WHERE caption IS NULL OR length(caption) = 0 ORDER BY id ASC LIMIT ?',
+                (int(limit),),
+            ).fetchall()
+            return [dict(r) for r in rows]
 
     def remove_meme(self, meme_id: int) -> bool:
         with self._conn() as c:

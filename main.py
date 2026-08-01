@@ -25,6 +25,8 @@ from astrbot.api.star import Context, Star, register
 from astrbot.core.message.message_event_result import MessageChain
 
 from .core import BaseEmbedder, EmbedderFactory, MemeDatabase, MemeIndexer, MemeRetriever
+from .core.captioner import CaptionGenerator, enrich_meme_captions
+from .core.retriever_dual import DualRetriever
 from .core.indexer import IndexProgress
 
 PLUGIN_NAME = "vector_meme"
@@ -84,6 +86,8 @@ class VectorMemePlugin(Star):
         self._db: MemeDatabase | None = None
         self._indexer: MemeIndexer | None = None
         self._retriever: MemeRetriever | None = None
+        self._captioner: CaptionGenerator | None = None
+        self.caption_enabled = bool(self.config.get('enable_vision_caption', False))
         self._indexer_lock = asyncio.Lock()
 
         self._init_storage()
@@ -165,13 +169,16 @@ class VectorMemePlugin(Star):
                 use_subdir_as_tag=bool(self.config.get("use_subdir_as_tag", True)),
                 default_tag=self.config.get("default_tag", "misc"),
             )
-            self._retriever = MemeRetriever(
+            retriever_cls = DualRetriever if self.caption_enabled else MemeRetriever
+            self._retriever = retriever_cls(
                 self._db,
                 self._embedder,
                 anti_repeat_window=int(self.config.get("anti_repeat_window", 20)),
                 candidate_pool_size=int(self.config.get("selection_pool_size", 12)),
                 random_jitter=float(self.config.get("selection_random_jitter", 0.015)),
             )
+            if self.caption_enabled and hasattr(self._retriever, 'caption_weight'):
+                self._retriever.caption_weight = float(self.config.get('caption_score_weight', 0.6))
             return self._embedder
 
     @staticmethod
@@ -220,6 +227,32 @@ class VectorMemePlugin(Star):
             "hf_endpoint": hf_endpoint,
             "cache_dir_env": cache_dir,
         }
+
+    def _ensure_captioner(self) -> CaptionGenerator:
+        if self._captioner is None:
+            self._captioner = CaptionGenerator(
+                self.context,
+                provider_id=str(self.config.get('vision_provider_id') or ''),
+            )
+        return self._captioner
+
+    async def _enrich_captions_after_index(self) -> dict:
+        try:
+            captioner = self._ensure_captioner()
+            if not captioner.available():
+                logger.warning(f'[{PLUGIN_NAME}] vision caption enabled but provider unavailable')
+                return {}
+            result = await enrich_meme_captions(
+                self._db,
+                self._embedder,
+                captioner,
+                limit=int(self.config.get('caption_batch_limit', 500)),
+            )
+            self._db.save_index()
+            return result
+        except Exception:
+            logger.exception(f'[{PLUGIN_NAME}] caption enrichment failed')
+            return {}
 
     async def _ensure_ready(self) -> tuple[MemeRetriever, MemeIndexer, MemeDatabase] | None:
         await self._ensure_embedder()
@@ -287,6 +320,7 @@ class VectorMemePlugin(Star):
                 "删除": self._cmd_delete,
                 "刷新提示": self._cmd_reload_prompt,
                 "帮助": self._cmd_help,
+                'caption': self._cmd_caption,
             }.get(sub, self._cmd_help)
         try:
             async for result in handler(event, rest):
@@ -492,6 +526,12 @@ class VectorMemePlugin(Star):
                 reporter_task.cancel()
         # 索引完成 → 标签列表可能变化 → 重新注入 prompt
         self._inject_into_personas()
+        if self.caption_enabled:
+            caption_result = await self._enrich_captions_after_index()
+            if caption_result:
+                yield event.plain_result(
+                    'caption: total={total}, ok={ok}, failed={failed}'.format(**caption_result)
+                )
         yield event.plain_result(
             f"索引完成\n"
             f"- 新增: {progress.added}\n"
@@ -808,6 +848,12 @@ class VectorMemePlugin(Star):
         for tag in counts:
             db.upsert_tag(tag)
         self._inject_into_personas()
+        if self.caption_enabled:
+            caption_result = await self._enrich_captions_after_index()
+            if caption_result:
+                yield event.plain_result(
+                    'caption: total={total}, ok={ok}, failed={failed}'.format(**caption_result)
+                )
         yield event.plain_result(
             f"修复完成\n- 清理缺失文件记录: {removed}\n- 注册/确认 tag: {len(counts)}\n- 已刷新 prompt"
         )
@@ -1008,6 +1054,35 @@ class VectorMemePlugin(Star):
         except Exception as e:
             logger.exception(f"[{PLUGIN_NAME}] 重载 prompt 失败")
             yield event.plain_result(f"[{PLUGIN_NAME}] 重载失败: {e}")
+
+    async def _cmd_caption(self, event: AstrMessageEvent, rest: list[str]):
+        if not self.caption_enabled:
+            yield event.plain_result('vision caption disabled (enable_vision_caption=false)')
+            return
+        ready = await self._ensure_ready()
+        if not ready:
+            yield event.plain_result('embedder not ready')
+            return
+        captioner = self._ensure_captioner()
+        if not captioner.available():
+            yield event.plain_result('vision provider unavailable (vision_provider_id empty or invalid)')
+            return
+        limit = 200
+        if rest:
+            try:
+                limit = int(rest[0])
+            except Exception:
+                pass
+        result = await enrich_meme_captions(
+            self._db,
+            self._embedder,
+            captioner,
+            limit=limit,
+        )
+        self._db.save_index()
+        yield event.plain_result(
+            'caption done: total={total}, ok={ok}, failed={failed}'.format(**result)
+        )
 
     async def _cmd_help(self, event: AstrMessageEvent, rest: list[str] | None = None):
         yield event.plain_result(

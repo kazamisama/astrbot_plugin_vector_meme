@@ -28,5 +28,5 @@ help: |
   LLM 集成：
     在回复中输出 %%happy%% 这类占位符，插件会移除占位符并追加匹配图片。
     默认不使用 &&tag&&，避免和 meme_manager 冲突。
-version: 0.2.0
+version: 0.3.0
 author: chiriu & 橘雪莉

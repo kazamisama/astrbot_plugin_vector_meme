@@ -11,6 +11,27 @@
     "default": ""
   },
 
+  "enable_vision_caption": {
+    "description": "【语义增强】启用 vision LLM 生成表情语义描述（caption），并参与双路向量检索",
+    "type": "bool",
+    "default": false,
+    "hint": "需要 AstrBot 配置了支持图片输入的视觉模型；开启后索引/重建会自动补 caption，也可用 /vm caption 手动补"
+  },
+  "vision_provider_id": {
+    "description": "【语义增强】用于生成 caption 的视觉模型 provider ID（留空则禁用 caption）",
+    "type": "string",
+    "default": ""
+  },
+  "caption_score_weight": {
+    "description": "【语义增强】双路检索中 caption 文本向量权重（0-1，其余为图片向量权重）",
+    "type": "float",
+    "default": 0.6
+  },
+  "caption_batch_limit": {
+    "description": "【语义增强】单次 caption 补全最大处理张数",
+    "type": "int",
+    "default": 500
+  },
   "embedder_backend": {
     "description": "【模型与设备】嵌入模型后端",
     "type": "string",
