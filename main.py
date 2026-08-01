@@ -437,23 +437,13 @@ class VectorMemePlugin(Star):
 
         # 心跳：embedder 加载阶段（可能下载模型，可能拉很久）
         embedder_done = asyncio.Event()
-        umo = event.unified_msg_origin
-        bot = getattr(event, "bot", None)
+        from astrbot.core.message.message_event_result import MessageEventResult
 
         async def _send(text):
-            if bot is not None and umo:
-                from astrbot.core.message.message_event_result import MessageEventResult
-                chain = MessageEventResult().message(text)
-                try:
-                    await bot.send(umo, chain)
-                except Exception as e:
-                    logger.warning(f"[{PLUGIN_NAME}] 后台发消息失败: {e}")
-            else:
-                # 退路：依旧 yield（虽然很可能到不了用户）
-                try:
-                    event.send(event.plain_result(text))
-                except Exception:
-                    pass
+            try:
+                await event.send(MessageEventResult().message(text))
+            except Exception as e:
+                logger.warning(f"[{PLUGIN_NAME}] 后台发消息失败: {e}")
 
         async def _embedder_heartbeat():
             t = 0
@@ -554,23 +544,13 @@ class VectorMemePlugin(Star):
         )
 
         embedder_done = asyncio.Event()
-        umo = event.unified_msg_origin
-        bot = getattr(event, "bot", None)
+        from astrbot.core.message.message_event_result import MessageEventResult
 
         async def _send(text):
-            if bot is not None and umo:
-                from astrbot.core.message.message_event_result import MessageEventResult
-                chain = MessageEventResult().message(text)
-                try:
-                    await bot.send(umo, chain)
-                except Exception as e:
-                    logger.warning(f"[{PLUGIN_NAME}] 后台发消息失败: {e}")
-            else:
-                # 退路：依旧 yield（虽然很可能到不了用户）
-                try:
-                    event.send(event.plain_result(text))
-                except Exception:
-                    pass
+            try:
+                await event.send(MessageEventResult().message(text))
+            except Exception as e:
+                logger.warning(f"[{PLUGIN_NAME}] 后台发消息失败: {e}")
 
         async def _embedder_heartbeat():
             t = 0

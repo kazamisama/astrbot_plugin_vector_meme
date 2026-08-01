@@ -13,6 +13,7 @@
 - 修复：命令注册补充 vm alias，`/vm` 前缀命令可用（此前仅 `表情向量`/`vmem`）
 - 修复：OpenCLIP 权重加载兼容 PyTorch 2.6+（load_checkpoint 显式 weights_only=False）
 - 文档：README/metadata 更新（XML 结构化输出集成、memes/ 入库、17 标签三分类、caption 命令）
+- 修复：/vm 索引、/vm 重建 后台进度消息改用 event.send，修复 v4.25.5 下 bot.send 参数不识别导致的发送失败
 
 ## [0.3.0] - 2026-08-01
 
