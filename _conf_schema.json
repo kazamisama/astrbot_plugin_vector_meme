@@ -91,9 +91,11 @@
         "hint": "需要 AstrBot 配置了支持图片输入的视觉模型；开启后索引/重建会自动补 caption，也可用 /vm caption 手动补。embedder_backend=api 时强制开启"
       },
       "vision_provider_id": {
-        "description": "用于生成 caption 的视觉模型 provider ID（留空则禁用 caption）",
+        "description": "生成 caption 的视觉模型",
         "type": "string",
-        "default": ""
+        "default": "",
+        "_special": "select_provider",
+        "hint": "从下拉选择支持图片输入的对话模型提供商；caption 生成走该模型的视觉通道。留空则无视觉模型可用（有 captions.json 时仍可复用固化 caption）"
       },
       "caption_score_weight": {
         "description": "双路检索中 caption 文本向量权重（0-1，其余为图片向量权重）",

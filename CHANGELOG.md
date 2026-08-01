@@ -1,5 +1,11 @@
 # 更新日志
 
+## [0.6.1] - 2026-08-02
+
+### 改进
+- vision_provider_id 改为下拉选择（_special=select_provider），直接选已配置的对话模型提供商，不再手填 ID
+- description 精简为「生成 caption 的视觉模型」
+
 ## [0.6.0] - 2026-08-02
 
 ### 新增
