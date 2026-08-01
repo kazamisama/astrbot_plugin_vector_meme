@@ -11,6 +11,8 @@
 - /vm 修复、/vm 重建 自动清理 schema 外且无表情引用的残留 tag
 - memes/ 表情库纳入 git 跟踪，便于迁移
 - 修复：命令注册补充 vm alias，`/vm` 前缀命令可用（此前仅 `表情向量`/`vmem`）
+- 修复：OpenCLIP 权重加载兼容 PyTorch 2.6+（load_checkpoint 显式 weights_only=False）
+- 文档：README/metadata 更新（XML 结构化输出集成、memes/ 入库、17 标签三分类、caption 命令）
 
 ## [0.3.0] - 2026-08-01
 

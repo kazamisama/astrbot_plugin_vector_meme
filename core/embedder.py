@@ -132,7 +132,8 @@ class OpenCLIPEmbedder(BaseEmbedder):
                 pretrained=None,
                 device=device,
             )
-            open_clip.load_checkpoint(self._model, checkpoint_path, device=device)
+            # PyTorch 2.6+ 默认 weights_only=True，TorchScript 存档会报错，需显式关闭
+            open_clip.load_checkpoint(self._model, checkpoint_path, device=device, weights_only=False)
         elif pretrained == "openai":
             cfg = open_clip.get_pretrained_cfg(model_name, pretrained)
             url = open_clip.get_pretrained_url(model_name, pretrained)
@@ -149,7 +150,7 @@ class OpenCLIPEmbedder(BaseEmbedder):
                 image_interpolation=cfg.get("interpolation"),
                 image_resize_mode=cfg.get("resize_mode"),
             )
-            open_clip.load_checkpoint(self._model, checkpoint_path, device=device)
+            open_clip.load_checkpoint(self._model, checkpoint_path, device=device, weights_only=False)
         else:
             self._model, _, self._preprocess = open_clip.create_model_and_transforms(
                 model_name, pretrained=pretrained, device=device, cache_dir=cache_dir

@@ -1,9 +1,9 @@
 name: vector_meme
-desc: 基于向量检索的 AstrBot 智能表情包插件。LLM 输出 %%tag%% 情绪占位符，插件结合 CLIP/OpenCLIP 向量相似度、tag 加权、反重复和随机采样选择具体图片。可独立运行，不依赖 meme_manager。
+desc: 基于向量检索的 AstrBot 智能表情包插件。LLM 输出 %%tag%% 情绪占位符，插件结合 CLIP/OpenCLIP 向量相似度、tag 加权、反重复和随机采样选择具体图片；支持被 XML 结构化输出插件经 <sticker> 标记转发调用。可独立运行，不依赖 meme_manager。
 help: |
   智能表情包 vector_meme
 
-  基础命令：
+  基础命令（触发词：表情向量 / vmem / vm）：
     /vm 状态                  - 查看索引状态
     /vm 预热                  - 预加载 embedder，检查模型可用性
     /vm 索引 [目录]           - 扫描目录并增量建立索引
@@ -24,9 +24,12 @@ help: |
     /vm 重标注 <id> <新tag>   - 手动修改数据库主 tag，不移动文件
     /vm 评测 <eval.json>      - 跑小型分类评测集
     /vm 标签规范              - 查看 tag_schema.json 标签说明
+    /vm caption [limit]       - 为无 caption 的表情批量生成视觉语义描述
 
   LLM 集成：
     在回复中输出 %%happy%% 这类占位符，插件会移除占位符并追加匹配图片。
+    配合 XML 结构化输出插件时，也可输出 <sticker>happy</sticker> 标记，
+    由 XML 插件经 search_sticker_for_external() 转发取图。
     默认不使用 &&tag&&，避免和 meme_manager 冲突。
 version: 0.4.0
 author: chiriu & 橘雪莉
