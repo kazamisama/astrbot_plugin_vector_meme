@@ -1,5 +1,10 @@
 # 更新日志
 
+## [0.6.9] - 2026-08-02
+
+### 修复
+- 修复 `search_sticker_for_external` 解包 `_ensure_ready()` 返回值位置错误（`_, retriever, _` → `retriever, _, _`），导致 XML 插件 `<sticker>` 转发路径拿到 MemeIndexer 报 `AttributeError: 'MemeIndexer' object has no attribute 'retrieve'`、表情包始终发不出的问题
+
 ## [0.6.8] - 2026-08-02
 
 ### 修复

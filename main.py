@@ -92,7 +92,7 @@ DEFAULT_PROMPT_TAIL_2 = (
     PLUGIN_NAME,
     "chiriu & 橘雪莉",
     "基于向量检索的智能表情包插件",
-    "0.6.8",
+    "0.6.9",
 )
 class VectorMemePlugin(Star):
     def __init__(self, context: Context, config: dict | None = None):
@@ -1490,7 +1490,7 @@ class VectorMemePlugin(Star):
             ready = await self._ensure_ready()
             if ready is None:
                 return None
-            _, retriever, _ = ready
+            retriever, _, _ = ready
             max_n = max(int(max_n), 1)
 
             def _search() -> str | None:
