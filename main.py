@@ -43,6 +43,31 @@ PLUGIN_NAME = "vector_meme"
 # 可选兼容旧格式：&&<tag>&& 或 :<tag>:（见 allow_legacy_markup 配置）
 VM_TAG_PATTERN = re.compile(r"%%\s*([a-zA-Z0-9_\-一-鿿]+)\s*%%")
 LEGACY_TAG_PATTERN = re.compile(r"&&\s*([a-zA-Z0-9_\-一-鿿]+)\s*&&|:\s*([a-zA-Z0-9_\-一-鿿]+)\s*:")
+# <sticker>...</sticker> 块归 astrbot_plugin_xml_structured_output 处理；
+# vector_meme 不提取、不清理块内的 %%tag%% 占位符，避免该插件静默丢弃 sticker。
+STICKER_BLOCK_RE = re.compile(r"<sticker[^>]*>.*?</sticker>", re.DOTALL | re.IGNORECASE)
+
+
+def strip_tags_outside_stickers(text: str, allow_legacy: bool = False) -> str:
+    """清理 %%tag%%（及可选 legacy 标记），但保留 <sticker>...</sticker> 块原样。"""
+    if not text:
+        return text
+    parts: list[str] = []
+    pos = 0
+    for m in STICKER_BLOCK_RE.finditer(text):
+        seg = text[pos:m.start()]
+        seg = VM_TAG_PATTERN.sub("", seg)
+        if allow_legacy:
+            seg = LEGACY_TAG_PATTERN.sub("", seg)
+        parts.append(seg)
+        parts.append(m.group(0))
+        pos = m.end()
+    tail = text[pos:]
+    tail = VM_TAG_PATTERN.sub("", tail)
+    if allow_legacy:
+        tail = LEGACY_TAG_PATTERN.sub("", tail)
+    parts.append(tail)
+    return "".join(parts)
 
 # 默认注入到全局人格的 prompt 模板
 # 拼装规则：prompt_head + 标签列表 + prompt_tail_1 + max_n + prompt_tail_2
@@ -67,7 +92,7 @@ DEFAULT_PROMPT_TAIL_2 = (
     PLUGIN_NAME,
     "chiriu & 橘雪莉",
     "基于向量检索的智能表情包插件",
-    "0.6.4",
+    "0.6.8",
 )
 class VectorMemePlugin(Star):
     def __init__(self, context: Context, config: dict | None = None):
@@ -1247,9 +1272,11 @@ class VectorMemePlugin(Star):
             if not text:
                 return
 
-            tags = VM_TAG_PATTERN.findall(text)
+            # <sticker> 块内的占位符归 xml_structured_output 处理，不在这里提取
+            outside_text = STICKER_BLOCK_RE.sub("", text)
+            tags = VM_TAG_PATTERN.findall(outside_text)
             if self.config.get("allow_legacy_markup", False):
-                legacy = LEGACY_TAG_PATTERN.findall(text)
+                legacy = LEGACY_TAG_PATTERN.findall(outside_text)
                 tags.extend([a or b for a, b in legacy])
 
             # 去空、去重、限量；过滤掉数字引用/纯标点等非法 tag
@@ -1268,11 +1295,11 @@ class VectorMemePlugin(Star):
                 if len(filtered_tags) >= max_n:
                     break
 
-            # 无 tag 也要清理残留非法 %%...%%，但不触发表情
-            clean_text = VM_TAG_PATTERN.sub("", text)
-            if self.config.get("allow_legacy_markup", False):
-                clean_text = LEGACY_TAG_PATTERN.sub("", clean_text)
-            clean_text = clean_text.strip()
+            # 无 tag 也要清理残留非法 %%...%%，但不触发表情；sticker 块保持原样
+            clean_text = strip_tags_outside_stickers(
+                text,
+                allow_legacy=bool(self.config.get("allow_legacy_markup", False)),
+            ).strip()
 
             if hasattr(response, "completion_text"):
                 response.completion_text = clean_text
@@ -1283,9 +1310,10 @@ class VectorMemePlugin(Star):
             if chain:
                 for c in chain:
                     if isinstance(c, Plain):
-                        c.text = VM_TAG_PATTERN.sub("", c.text)
-                        if self.config.get("allow_legacy_markup", False):
-                            c.text = LEGACY_TAG_PATTERN.sub("", c.text)
+                        c.text = strip_tags_outside_stickers(
+                            c.text,
+                            allow_legacy=bool(self.config.get("allow_legacy_markup", False)),
+                        )
 
             if not filtered_tags:
                 return
@@ -1316,10 +1344,10 @@ class VectorMemePlugin(Star):
             original_chain = result.chain
 
             def _clean_text(s: str) -> str:
-                s = VM_TAG_PATTERN.sub("", s)
-                if self.config.get("allow_legacy_markup", False):
-                    s = LEGACY_TAG_PATTERN.sub("", s)
-                return s
+                return strip_tags_outside_stickers(
+                    s,
+                    allow_legacy=bool(self.config.get("allow_legacy_markup", False)),
+                )
 
             def _iter_components(chain):
                 if chain is None:
@@ -1452,6 +1480,10 @@ class VectorMemePlugin(Star):
         '''
         try:
             tag = (tag or '').strip()
+            # 兼容 <sticker>%%tag%%</sticker> 的混合写法：剥掉 %%
+            m = VM_TAG_PATTERN.fullmatch(tag)
+            if m:
+                tag = m.group(1)
             if not tag or not self._is_valid_emotion_tag(tag):
                 return None
             # 冷 embedder：触发一次懒加载（可能较久，但只在外部真正请求 sticker 时发生）
@@ -1482,7 +1514,9 @@ class VectorMemePlugin(Star):
             # api 后端单次 embedding 可达 ~20s；超时对齐 embedder 内部上限（60s）
             path = await asyncio.wait_for(asyncio.to_thread(_search), timeout=30.0)
             if not path:
+                logger.debug(f'[{PLUGIN_NAME}] search_sticker_for_external 无命中: tag={tag!r}')
                 return None
+            logger.info(f'[{PLUGIN_NAME}] search_sticker_for_external 命中: tag={tag}, file={Path(path).name}')
             return str(Path(path).resolve())
         except Exception:
             logger.debug(f'[{PLUGIN_NAME}] search_sticker_for_external failed: tag={tag!r}', exc_info=True)

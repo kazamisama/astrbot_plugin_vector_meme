@@ -1,5 +1,12 @@
 # 更新日志
 
+## [0.6.8] - 2026-08-02
+
+### 修复
+- 修复 faiss 维度不匹配时启动加载成空索引、导致 api 后端重启后检索全空的问题：`_load_or_create_index` 改为采用文件实际维度
+- 修复 `<sticker>%%tag%%</sticker>` 被 `on_llm_response` 提前剥离占位符、导致 XML 插件解析到空 `<sticker></sticker>` 静默丢弃的问题：vector_meme 不再提取/清理 `<sticker>` 块内的 `%%tag%%`
+- `search_sticker_for_external` 兼容 `<sticker>%%tag%%</sticker>` 写法（`%%` 归一化），并补充命中/未命中日志
+
 ## [0.6.7] - 2026-08-02
 
 ### 修复

@@ -135,8 +135,8 @@ class MemeDatabase:
             try:
                 idx = faiss.read_index(str(self.index_path))
                 if idx.d != self.dim:
-                    # 维度不匹配，重建
-                    idx = faiss.IndexFlatIP(self.dim)
+                    # 维度不匹配：采用文件实际维度，避免建空索引导致检索全空
+                    self.dim = idx.d
                 return idx
             except Exception:
                 pass
