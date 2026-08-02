@@ -214,12 +214,35 @@ class MemeIndexer:
             vectors_batch.clear()
             meta_batch.clear()
 
+        def upsert_without_vector(path: Path):
+            """api 后端：图片不可编码，仍入库 meme 记录（vector_id=-1），caption 向量由 enrich 阶段建立。"""
+            fhash, w, h, size, _ = file_meta[path]
+            tag = self._resolve_tag(path, root)
+            self.db.upsert_tag(tag, **tag_meta(tag, self.tag_schema))
+            is_update = str(path) in existing
+            self.db.upsert_meme(
+                file_path=str(path),
+                file_hash=fhash,
+                tag=tag,
+                vector_id=-1,
+                file_name=path.name,
+                width=w,
+                height=h,
+                file_size=size,
+            )
+            if is_update:
+                progress.updated += 1
+                self.db.log_index_action("update", str(path), "success")
+            else:
+                progress.added += 1
+                self.db.log_index_action("add", str(path), "success")
+
         for p in to_embed:
             try:
                 vec = _embed_one(self.embedder, p)
             except NotImplementedError:
-                # api 后端：图片不可直接编码，主向量留空，检索走 caption 路
-                progress.skipped += 1
+                # api 后端：图片不可直接编码，主向量留空（vector_id=-1），检索走 caption 路
+                upsert_without_vector(p)
                 progress.done += 1
                 if progress.on_progress:
                     progress.on_progress(progress.done, progress.total, p)
