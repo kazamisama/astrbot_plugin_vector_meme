@@ -715,6 +715,12 @@ class VectorMemePlugin(Star):
         # 重建完成 → 标签列表已变 → 同步 schema 并清理残留 → 重新注入
         self._sync_tag_registry(indexer.db)
         self._inject_into_personas()
+        if self.caption_enabled:
+            caption_result = await self._enrich_captions_after_index()
+            if caption_result:
+                yield event.plain_result(
+                    'caption: total={total}, ok={ok}, failed={failed}'.format(**caption_result)
+                )
         yield event.plain_result(
             f"重建完成，共处理 {progress.total} 张（新增 {progress.added}）"
         )
