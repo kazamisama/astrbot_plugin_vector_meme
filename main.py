@@ -22,7 +22,7 @@ from astrbot.api.message_components import Image as ImgComp
 from astrbot.api.message_components import Plain
 from astrbot.api.provider import LLMResponse
 from astrbot.api.star import Context, Star, register
-from astrbot.core.message.message_event_result import MessageChain
+from astrbot.core.message.message_event_result import MessageChain, ResultContentType
 
 from .core import BaseEmbedder, EmbedderFactory, MemeDatabase, MemeIndexer, MemeRetriever
 from .core.indexer import tag_meta
@@ -1326,7 +1326,7 @@ class VectorMemePlugin(Star):
 
     @filter.on_decorating_result(priority=99998)
     async def on_decorating_result(self, event: AstrMessageEvent):
-        """发送前根据 pending tags 做向量检索，把图片合入 result.chain 或挂到 pending。"""
+        """发送前根据 pending tags 做向量检索：合入 chain / 挂 pending / 流式下直接补发。"""
         result = event.get_result()
         if not result:
             return
@@ -1410,6 +1410,18 @@ class VectorMemePlugin(Star):
             event.set_extra("vector_meme_pending_tags", None)
 
             if not images:
+                return
+
+            # 流式输出（STREAMING_FINISH）下：文本已逐 chunk 直发前端，装饰阶段追加进
+            # result.chain 的图片不会被 respond 发送，after_message_sent 也不会触发；
+            # 因此改为直接补发，非混合模式同样走这里兜底。
+            is_stream = result.result_content_type == ResultContentType.STREAMING_FINISH
+            if is_stream:
+                for image in images:
+                    try:
+                        await event.send(MessageChain([image]))
+                    except Exception as e:
+                        logger.warning(f"[{PLUGIN_NAME}] 流式补发表情失败: {e}")
                 return
 
             # 默认混合图文：图片追加到文本链末尾，并保留原链类型（MessageChain 或 list）。
