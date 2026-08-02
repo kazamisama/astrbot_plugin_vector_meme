@@ -1,5 +1,12 @@
 # 更新日志
 
+## [0.6.7] - 2026-08-02
+
+### 修复
+- `search_sticker_for_external`（XML 插件转发路径）：冷 embedder 改为触发一次懒加载，不再直接返回 None
+- 外部检索超时 2s → 30s（对齐 api 后端单次 embedding 约 20s 的实际耗时），修复 `<sticker>` 标签被直发原始 XML 的问题
+- 外部检索开启 `fallback_to_all_tags` 兜底，caption 检索 miss 时不再空手而归
+
 ## [0.6.6] - 2026-08-02
 
 ### 修复

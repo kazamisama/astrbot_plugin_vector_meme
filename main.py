@@ -1436,12 +1436,14 @@ class VectorMemePlugin(Star):
         '''External entry point for other plugins: pick one sticker by emotion/semantic tag.
 
         Contract (agreed with astrbot_plugin_xml_structured_output):
-        - Never raises: empty tag / cold embedder / timeout / no match all return None.
+        - Never raises: empty tag / embedder load failure / timeout / no match
+          all return None.
         - Does NOT call pick(): no mark_used / anti_repeat writes, so external
           high-frequency calls never pollute the internal dedup pool.
-        - Cold embedder returns None immediately; this path never triggers the
-          lazy model load (which can take minutes).
-        - Whole call is bounded by a 2s timeout (embed + DB query included).
+        - Cold embedder triggers one lazy load via _ensure_ready(); subsequent
+          calls reuse the warm embedder.
+        - Whole call is bounded by a 30s timeout (embed + DB query included),
+          aligned with the api embedder's internal 60s limit.
         - user_id / scope_id are reserved for future per-user dedup; v1 ignores
           them because the internal dedup window is global, not per-user.
 
@@ -1452,10 +1454,12 @@ class VectorMemePlugin(Star):
             tag = (tag or '').strip()
             if not tag or not self._is_valid_emotion_tag(tag):
                 return None
-            if self._embedder is None or self._retriever is None or self._db is None:
+            # 冷 embedder：触发一次懒加载（可能较久，但只在外部真正请求 sticker 时发生）
+            ready = await self._ensure_ready()
+            if ready is None:
                 return None
+            _, retriever, _ = ready
             max_n = max(int(max_n), 1)
-            retriever = self._retriever
 
             def _search() -> str | None:
                 result = retriever.retrieve(
@@ -1463,7 +1467,7 @@ class VectorMemePlugin(Star):
                     tag=tag,
                     topk=max_n,
                     anti_repeat=False,
-                    fallback_to_all_tags=False,
+                    fallback_to_all_tags=True,
                 )
                 if not result.hits:
                     return None
@@ -1475,7 +1479,8 @@ class VectorMemePlugin(Star):
                 )
                 return hit.file_path
 
-            path = await asyncio.wait_for(asyncio.to_thread(_search), timeout=2.0)
+            # api 后端单次 embedding 可达 ~20s；超时对齐 embedder 内部上限（60s）
+            path = await asyncio.wait_for(asyncio.to_thread(_search), timeout=30.0)
             if not path:
                 return None
             return str(Path(path).resolve())
