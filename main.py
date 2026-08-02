@@ -647,6 +647,12 @@ class VectorMemePlugin(Star):
                 await _send(f"⏳ 仍在加载 embedder... ({t}s)")
         heartbeat_task = asyncio.create_task(_embedder_heartbeat())
         try:
+            # rebuild 语义：从零重建。先清空旧库，否则旧维度库会拦截 embedder 加载（维度不一致保护）
+            if self._db is not None:
+                with self._db._conn() as c:  # noqa: SLF001
+                    c.execute("DELETE FROM memes")
+                if self._db.index_path.exists():
+                    self._db.index_path.unlink()
             ready = await self._ensure_ready()
         finally:
             embedder_done.set()
