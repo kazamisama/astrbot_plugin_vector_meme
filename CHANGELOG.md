@@ -1,5 +1,10 @@
 # 更新日志
 
+## [0.6.3] - 2026-08-02
+
+### 修复
+- metadata.yaml 补充 repo 字段，修复 AstrBot 面板无法更新插件（does not specify a repository URL）
+
 ## [0.6.2] - 2026-08-02
 
 ### 修复
