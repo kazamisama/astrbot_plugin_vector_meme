@@ -33,4 +33,4 @@ help: |
     默认不使用 &&tag&&，避免和 meme_manager 冲突。
 version: 0.7.2
 author: chiriu & 橘雪莉
-repo: https://github.com/kazamisama/astrbot_plugin_vector_meme
+repo: https://github.com/kazamisama/astrbot_plugin_vector_meme/tree/main
