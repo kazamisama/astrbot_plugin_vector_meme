@@ -207,33 +207,28 @@ class MemeRetriever:
             return RetrievalResult(query_text=query_text, tag_filter=tag, used_fallback=used_fallback, original_tag=original_tag)
 
         vec_ids = np.array([c[0] for c in candidates], dtype=np.int64)
-        meme_ids = [c[1] for c in candidates]
-        vid_to_mid = {int(v): m for v, m in zip(vec_ids.tolist(), meme_ids)}
 
-        # 用 IDSelectorBatch 直接在主索引上做"限定候选集"的 top-k 检索，
-        # 避免 reconstruct_n(全量) + IndexFlatIP 重建，把检索从 O(N) 降到 O(K)。
-        import faiss
-        sel = faiss.IDSelectorBatch(vec_ids)
-        params = faiss.SearchParameters()
-        params.sel = sel
+        # IDSelectorBatch 只做候选集结果过滤；IndexFlatIP 仍是全量扫描，
+        # 但避免 reconstruct_n(全量) + 临时索引重建的额外开销。
         q = qvec.reshape(1, -1).astype("float32")
-        faiss.normalize_L2(q)
         search_k = min(max(int(topk), self.candidate_pool_size), len(candidates))
-        sims, found_vids = self.db._index.search(q, search_k, params=params)  # noqa: SLF001
-        sims = sims[0]
-        found_vids = found_vids[0]
+        sims, found_vids = self.db.search_index(q, search_k, ids=vec_ids)
 
-        # 把候选 meme 行映射预加载一次，避免在热路径里每次都查全表
-        candidate_mid_set = set(meme_ids)
+        # 只加载 FAISS 命中的 meme 行：命中数 ≤ search_k，避免全量预取和超长 IN 子句
+        found_set = {int(v) for v in found_vids if int(v) >= 0}
+        vid_to_mid: dict[int, int] = {}
+        for vid, mid in candidates:
+            if int(vid) in found_set:
+                vid_to_mid[int(vid)] = mid
+        found_mids = list(vid_to_mid.values())
         meme_rows: dict[int, dict] = {}
-        if candidate_mid_set:
-            # 用 in-memory 过滤代替 SQL 重新扫表
+        if found_mids:
             with self.db._conn() as c:  # noqa: SLF001
-                placeholders = ",".join("?" * len(candidate_mid_set))
+                placeholders = ",".join("?" * len(found_mids))
                 rows = c.execute(
                     f"SELECT id, file_path, tag, usage_count, last_used_at, description "
                     f"FROM memes WHERE id IN ({placeholders})",
-                    list(candidate_mid_set),
+                    found_mids,
                 ).fetchall()
                 for r in rows:
                     meme_rows[int(r["id"])] = dict(r)
@@ -364,7 +359,7 @@ class MemeRetriever:
         vecs = []
         if self.db.index_size <= 0:
             return rows, np.empty((0, self.db.dim), dtype="float32")
-        all_vecs = self.db._index.reconstruct_n(0, self.db.index_size)  # noqa: SLF001
+        all_vecs = self.db.reconstruct_all()
         for row in self.db.list_memes(limit=10_000_000):
             if exclude_meme_id is not None and int(row["id"]) == int(exclude_meme_id):
                 continue
@@ -452,7 +447,7 @@ class MemeRetriever:
         vid = int(row["vector_id"])
         if vid < 0 or vid >= self.db.index_size:
             return []
-        vector = self.db._index.reconstruct(vid)  # noqa: SLF001
+        vector = self.db.reconstruct(vid)
         return self.classify_vector(
             vector,
             exclude_meme_id=meme_id,

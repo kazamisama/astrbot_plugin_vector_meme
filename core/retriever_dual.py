@@ -61,17 +61,11 @@ class DualRetriever(MemeRetriever):
         """Search caption vectors, return {meme_id: cosine_similarity}."""
         if not candidates:
             return {}
-        import faiss
-
         cap_ids = np.array([c[0] for c in candidates], dtype=np.int64)
         cvid_to_mid = {int(v): m for v, m in zip(cap_ids.tolist(), [c[1] for c in candidates])}
-        sel = faiss.IDSelectorBatch(cap_ids)
-        params = faiss.SearchParameters()
-        params.sel = sel
         q = query_vector.reshape(1, -1).astype('float32')
-        faiss.normalize_L2(q)
         search_k = min(max(int(topk), self.candidate_pool_size), len(candidates))
-        sims, found = self.db._index.search(q, search_k, params=params)  # noqa: SLF001
+        sims, found = self.db.search_index(q, search_k, ids=cap_ids)
         out: dict[int, float] = {}
         for sim, vid in zip(sims[0], found[0]):
             if int(vid) < 0:

@@ -582,12 +582,17 @@ class VectorMemePlugin(Star):
 
         progress_q: asyncio.Queue = asyncio.Queue(maxsize=64)
 
-        def _on_progress(done, total, fp):
-            logger.info(f"[index] {done}/{total} {fp}")
+        loop = asyncio.get_running_loop()
+
+        def _queue_progress(done, total, fp):
             try:
                 progress_q.put_nowait((done, total, str(fp)))
             except asyncio.QueueFull:
                 pass
+
+        def _on_progress(done, total, fp):
+            logger.info(f"[index] {done}/{total} {fp}")
+            loop.call_soon_threadsafe(_queue_progress, done, total, str(fp))
 
         from astrbot.core.message.message_event_result import MessageEventResult
 
@@ -708,12 +713,17 @@ class VectorMemePlugin(Star):
 
         progress_q: asyncio.Queue = asyncio.Queue(maxsize=64)
 
-        def _on_progress(done, total, fp):
-            logger.info(f"[rebuild] {done}/{total} {fp}")
+        loop = asyncio.get_running_loop()
+
+        def _queue_progress(done, total, fp):
             try:
                 progress_q.put_nowait((done, total, str(fp)))
             except asyncio.QueueFull:
                 pass
+
+        def _on_progress(done, total, fp):
+            logger.info(f"[rebuild] {done}/{total} {fp}")
+            loop.call_soon_threadsafe(_queue_progress, done, total, str(fp))
 
         from astrbot.core.message.message_event_result import MessageEventResult
 
@@ -749,7 +759,7 @@ class VectorMemePlugin(Star):
                     c.execute("DELETE FROM memes")
                 if indexer.db.index_path.exists():
                     indexer.db.index_path.unlink()
-                indexer.db._index = type(indexer.db._index)(indexer.db.dim)  # noqa: SLF001
+                indexer.db.reset_index()
                 progress = await asyncio.to_thread(
                     lambda: indexer.index_directory(path, progress=IndexProgress(_on_progress))
                 )

@@ -145,11 +145,13 @@ class MemeDatabase:
 
     def save_index(self) -> None:
         if FAISS_AVAILABLE and self._index is not None and self._index.ntotal > 0:
-            faiss.write_index(self._index, str(self.index_path))
+            with self._lock:
+                faiss.write_index(self._index, str(self.index_path))
 
     @property
     def index_size(self) -> int:
-        return self._index.ntotal if self._index is not None else 0
+        with self._lock:
+            return self._index.ntotal if self._index is not None else 0
 
     def add_vectors(self, vectors: np.ndarray) -> np.ndarray:
         """添加向量到 FAISS，返回对应的 vector_id 列表。"""
@@ -163,12 +165,47 @@ class MemeDatabase:
             self._index.add(vectors)
             return np.arange(start_id, start_id + vectors.shape[0], dtype=np.int64)
 
+    def reset_index(self) -> None:
+        """用当前维度新建空索引（带锁），用于重建。"""
+        with self._lock:
+            self._index = faiss.IndexFlatIP(self.dim)
+
     def search(self, query: np.ndarray, topk: int = 10) -> tuple[np.ndarray, np.ndarray]:
         """返回 (相似度, vector_id)。"""
         query = query.astype("float32").reshape(1, -1)
         faiss.normalize_L2(query)
-        sims, ids = self._index.search(query, topk)
+        with self._lock:
+            sims, ids = self._index.search(query, topk)
         return sims[0], ids[0]
+
+    def search_index(
+        self,
+        query: np.ndarray,
+        topk: int,
+        ids: np.ndarray | None = None,
+    ) -> tuple[np.ndarray, np.ndarray]:
+        """带锁检索；ids 非空时用 IDSelectorBatch 限定候选集。"""
+        query = query.astype("float32").reshape(1, -1)
+        faiss.normalize_L2(query)
+        with self._lock:
+            if ids is not None and len(ids):
+                sel = faiss.IDSelectorBatch(ids)
+                params = faiss.SearchParameters()
+                params.sel = sel
+                sims, found = self._index.search(query, min(int(topk), len(ids)), params=params)
+            else:
+                sims, found = self._index.search(query, topk)
+        return sims[0], found[0]
+
+    def reconstruct(self, vector_id: int) -> np.ndarray:
+        """按 vector_id 取回向量（带锁）。"""
+        with self._lock:
+            return self._index.reconstruct(int(vector_id))
+
+    def reconstruct_all(self) -> np.ndarray:
+        """取回索引全部向量（带锁）。"""
+        with self._lock:
+            return self._index.reconstruct_n(0, self._index.ntotal)
 
     # ---------- Memes CRUD ----------
 
