@@ -26,6 +26,9 @@ def default_config_path() -> Path:
     return Path.home() / ".astrbot" / "data" / "config" / "astrbot_plugin_vector_meme_config.json"
 
 
+CONFIG_FILE = default_config_path()
+
+
 def load_schema() -> dict:
     with open(SCHEMA_FILE, encoding="utf-8") as f:
         return json.load(f)
@@ -53,7 +56,8 @@ def main() -> int:
     if not CONFIG_FILE.is_file():
         print(f"配置文件不存在: {CONFIG_FILE}")
         return 1
-    conf = json.loads(CONFIG_FILE.read_text(encoding="utf-8"))
+    # AstrBot 写入的配置文件可能带 UTF-8 BOM，用 utf-8-sig 读取
+    conf = json.loads(CONFIG_FILE.read_text(encoding="utf-8-sig"))
     if is_nested(conf):
         print("配置已是分组结构，无需迁移。")
         return 0

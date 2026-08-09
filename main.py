@@ -13,6 +13,7 @@ import copy
 import json
 import os
 import re
+import shutil
 from pathlib import Path
 
 from astrbot.api import logger
@@ -161,7 +162,7 @@ class VectorMemePlugin(Star):
             dim=temp_dim,
         )
 
-    async def _ensure_embedder(self) -> BaseEmbedder:
+    async def _ensure_embedder(self, for_rebuild: bool = False) -> BaseEmbedder:
         """懒加载嵌入器（首次调用才下载/加载模型）。"""
         if self._embedder is not None:
             return self._embedder
@@ -188,11 +189,11 @@ class VectorMemePlugin(Star):
                     )
 
             self._embedder = await loop.run_in_executor(None, _create)
-            # 维度不匹配：库里已有数据则拒绝静默重建，避免丢索引
+            # 维度不匹配：库里已有数据则拒绝静默重建，避免丢索引；重建流程可显式跳过
             if self._db is not None and self._db.dim != self._embedder.dim:
                 embedder_dim = self._embedder.dim
                 existing_count = self._db.total_count()
-                if existing_count > 0:
+                if existing_count > 0 and not for_rebuild:
                     try:
                         self._embedder.close()
                     except Exception:
@@ -203,11 +204,13 @@ class VectorMemePlugin(Star):
                         f"且库里已有 {existing_count} 条数据。为避免静默丢失向量索引，"
                         f"请运行 /表情向量 重建 重建索引，或回退到原来的模型。"
                     )
-                # 库里无数据：允许按新维度建表
+                # 重建或空库场景：丢弃旧维度残留索引，按新维度建库
                 logger.info(
-                    "embedder 维度 %d 与临时库维度 %d 不一致，因库里无数据，按新维度建库",
+                    "embedder 维度 %d 与库维度 %d 不一致，重建/空库场景按新维度建库",
                     embedder_dim, self._db.dim,
                 )
+                if self._db.index_path.exists():
+                    self._db.index_path.unlink()
                 self._db = MemeDatabase(
                     db_path=self.data_dir / "memes.db",
                     index_path=self.data_dir / "memes.faiss",
@@ -360,8 +363,8 @@ class VectorMemePlugin(Star):
             logger.exception(f'[{PLUGIN_NAME}] caption enrichment failed')
             return {}
 
-    async def _ensure_ready(self) -> tuple[MemeRetriever, MemeIndexer, MemeDatabase] | None:
-        await self._ensure_embedder()
+    async def _ensure_ready(self, for_rebuild: bool = False) -> tuple[MemeRetriever, MemeIndexer, MemeDatabase] | None:
+        await self._ensure_embedder(for_rebuild=for_rebuild)
         if self._retriever is None or self._indexer is None or self._db is None:
             return None
         return self._retriever, self._indexer, self._db
@@ -652,6 +655,19 @@ class VectorMemePlugin(Star):
             f"如果是 open_clip，首次加载/下载模型可能需要较久。"
         )
 
+        # 先备份旧库：embedder 加载/重建失败时保留恢复入口
+        backup_paths: list[tuple[Path, Path]] = []
+        if self._db is not None:
+            for p in (self._db.db_path, self._db.index_path):
+                if not p.exists():
+                    continue
+                bak = p.with_name(p.name + ".bak.v071")
+                try:
+                    shutil.copy2(p, bak)
+                    backup_paths.append((p, bak))
+                except Exception as e:
+                    logger.warning(f"[{PLUGIN_NAME}] 重建备份失败 {p} -> {bak}: {e}")
+
         embedder_done = asyncio.Event()
         from astrbot.core.message.message_event_result import MessageEventResult
 
@@ -672,13 +688,13 @@ class VectorMemePlugin(Star):
                 await _send(f"⏳ 仍在加载 embedder... ({t}s)")
         heartbeat_task = asyncio.create_task(_embedder_heartbeat())
         try:
-            # rebuild 语义：从零重建。先清空旧库，否则旧维度库会拦截 embedder 加载（维度不一致保护）
-            if self._db is not None:
-                with self._db._conn() as c:  # noqa: SLF001
-                    c.execute("DELETE FROM memes")
-                if self._db.index_path.exists():
-                    self._db.index_path.unlink()
-            ready = await self._ensure_ready()
+            # 重建语义：先加载 embedder（for_rebuild 跳过维度保护），失败时旧库原样保留
+            ready = await self._ensure_ready(for_rebuild=True)
+        except Exception as e:
+            logger.exception("重建：embedder 加载失败")
+            backup_hint = ", ".join(str(bak) for _, bak in backup_paths) or "无"
+            yield event.plain_result(f"embedder 加载失败，已保留原库。备份: {backup_hint}")
+            return
         finally:
             embedder_done.set()
             try:
@@ -737,12 +753,26 @@ class VectorMemePlugin(Star):
                 progress = await asyncio.to_thread(
                     lambda: indexer.index_directory(path, progress=IndexProgress(_on_progress))
                 )
+        except Exception:
+            logger.exception("重建：索引进程失败，旧库备份保留")
+            backup_hint = ", ".join(str(bak) for _, bak in backup_paths) or "无"
+            yield event.plain_result(
+                "重建失败，已保留重建前备份。恢复方法：停止 AstrBot，删除 memes.db / memes.faiss，"
+                f"把以下文件改回原名后重启: {backup_hint}"
+            )
+            return
         finally:
             reporter_done.set()
             try:
                 await asyncio.wait_for(reporter_task, timeout=3.0)
             except asyncio.TimeoutError:
                 reporter_task.cancel()
+        # 重建成功：清理备份
+        for _, bak in backup_paths:
+            try:
+                bak.unlink(missing_ok=True)
+            except Exception as e:
+                logger.warning(f"[{PLUGIN_NAME}] 删除重建备份失败 {bak}: {e}")
         # 重建完成 → 标签列表已变 → 同步 schema 并清理残留 → 重新注入
         self._sync_tag_registry(indexer.db)
         self._inject_into_personas()
