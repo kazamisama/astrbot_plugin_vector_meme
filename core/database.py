@@ -471,16 +471,82 @@ class MemeDatabase:
 
     # ---------- 维护 ----------
 
-    def rebuild_index_from_db(self) -> int:
-        """用库里所有有效 meme 重新同步 vector_id -> id 映射。
-        当 faiss index 重建后用此方法重建映射。
+    def live_vector_count(self) -> int:
+        """DB 中仍被引用（含禁用行）的向量槽数量，用于孤儿判断。"""
+        with self._conn() as c:
+            rows = c.execute(
+                "SELECT vector_id, caption_vector_id FROM memes"
+            ).fetchall()
+        max_size = self.index_size
+        count = 0
+        for r in rows:
+            for col in ("vector_id", "caption_vector_id"):
+                try:
+                    vid = int(r[col]) if r[col] is not None else -1
+                except Exception:
+                    vid = -1
+                if 0 <= vid < max_size:
+                    count += 1
+        return count
+
+    def compact_index(self) -> dict:
+        """重建 FAISS，移除孤儿向量并重映射 vector_id / caption_vector_id。
+
+        保留 disabled 行仍被引用的向量，避免重新启用后失效。
         """
         with self._conn() as c:
-            # 找出 vector_id 重复 / 缺失的情况
-            rows = c.execute("SELECT id, vector_id FROM memes WHERE disabled = 0 ORDER BY id").fetchall()
-            for i, row in enumerate(rows):
-                c.execute("UPDATE memes SET vector_id = ? WHERE id = ?", (i, row["id"]))
-            return len(rows)
+            rows = c.execute(
+                "SELECT id, vector_id, caption_vector_id FROM memes ORDER BY id"
+            ).fetchall()
+        max_size = self.index_size
+        image_rows: list[sqlite3.Row] = []
+        caption_rows: list[sqlite3.Row] = []
+        for r in rows:
+            try:
+                vid = int(r["vector_id"])
+            except Exception:
+                vid = -1
+            if 0 <= vid < max_size:
+                image_rows.append(r)
+            try:
+                cvid = int(r["caption_vector_id"]) if r["caption_vector_id"] is not None else -1
+            except Exception:
+                cvid = -1
+            if 0 <= cvid < max_size:
+                caption_rows.append(r)
+
+        image_vectors: list[np.ndarray] = []
+        caption_vectors: list[np.ndarray] = []
+        with self._lock:
+            for r in image_rows:
+                image_vectors.append(self._index.reconstruct(int(r["vector_id"])))
+            for r in caption_rows:
+                caption_vectors.append(self._index.reconstruct(int(r["caption_vector_id"])))
+            new_index = faiss.IndexFlatIP(self.dim)
+            if image_vectors:
+                arr = np.stack(image_vectors).astype("float32")
+                faiss.normalize_L2(arr)
+                new_index.add(arr)
+            if caption_vectors:
+                arr = np.stack(caption_vectors).astype("float32")
+                faiss.normalize_L2(arr)
+                new_index.add(arr)
+            self._index = new_index
+
+        with self._conn() as c:
+            for i, r in enumerate(image_rows):
+                c.execute("UPDATE memes SET vector_id = ? WHERE id = ?", (i, int(r["id"])))
+            for j, r in enumerate(caption_rows):
+                c.execute(
+                    "UPDATE memes SET caption_vector_id = ? WHERE id = ?",
+                    (len(image_vectors) + j, int(r["id"])),
+                )
+        self.save_index()
+        return {
+            "index_size": self.index_size,
+            "image_vectors": len(image_vectors),
+            "caption_vectors": len(caption_vectors),
+        }
 
     def stats(self) -> dict:
         with self._conn() as c:
@@ -498,7 +564,7 @@ class MemeDatabase:
     def health_check(self, root: str | Path | None = None) -> dict:
         """索引健康检查：DB/FAISS/文件系统一致性。"""
         with self._conn() as c:
-            rows = c.execute("SELECT id, file_path, file_hash, tag, vector_id, disabled FROM memes").fetchall()
+            rows = c.execute("SELECT id, file_path, file_hash, tag, vector_id, caption_vector_id, disabled FROM memes").fetchall()
             tag_rows = c.execute("SELECT name FROM tags").fetchall()
             duplicate_hash_rows = c.execute(
                 """SELECT file_hash, COUNT(*) AS n FROM memes
@@ -529,6 +595,17 @@ class MemeDatabase:
         duplicate_hashes = [{"file_hash": r["file_hash"], "count": r["n"]} for r in duplicate_hash_rows]
         unregistered_tags = sorted(t for t in used_tags if t not in known_tags)
         index_mismatch = self.index_size < len(active)
+        max_size = self.index_size
+        live_vectors = 0
+        for r in rows:
+            for col in ("vector_id", "caption_vector_id"):
+                try:
+                    vid = int(r[col]) if r[col] is not None else -1
+                except Exception:
+                    vid = -1
+                if 0 <= vid < max_size:
+                    live_vectors += 1
+        orphan_vector_count = max(max_size - live_vectors, 0)
         ok = not (missing_files or bad_vector_ids or index_mismatch)
         return {
             "ok": ok,
@@ -539,6 +616,8 @@ class MemeDatabase:
             "index_size": self.index_size,
             "dim": self.dim,
             "index_mismatch": index_mismatch,
+            "orphan_vector_count": orphan_vector_count,
+            "live_vector_count": live_vectors,
             "missing_files": missing_files,
             "missing_files_count": len(missing_files),
             "bad_vector_ids": bad_vector_ids,

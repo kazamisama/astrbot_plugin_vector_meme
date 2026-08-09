@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
-import copy
 import json
 import os
 import re
@@ -89,6 +88,14 @@ DEFAULT_PROMPT_TAIL_2 = (
     "- 严禁使用列表外标签；如需表达列表外的情绪，选择最接近的"
 )
 
+# persona 注入用固定 marker 块，幂等注入/还原只操作标记块，不依赖一次性备份
+PERSONA_MARKER_START = "<!-- vector_meme_prompt_start -->"
+PERSONA_MARKER_END = "<!-- vector_meme_prompt_end -->"
+PERSONA_INJECT_RE = re.compile(
+    r"\s*<!-- vector_meme_prompt_start -->.*?<!-- vector_meme_prompt_end -->\s*",
+    re.DOTALL,
+)
+
 @register(
     PLUGIN_NAME,
     "chiriu & 橘雪莉",
@@ -142,12 +149,8 @@ class VectorMemePlugin(Star):
 
         self._init_storage()
 
-        # ---------- 备份 persona 用于 prompt 注入还原 ----------
-        # 必须在第一次注入之前 deep copy，保留每个 persona 的原始 prompt。
-        # 即使 enable_prompt_injection 关闭也要备份，方便后续开启。
-        personas_now = self.context.provider_manager.personas or []
-        self._persona_backup: list[dict] = copy.deepcopy(personas_now)
-        self._sys_prompt_add: str = ""
+        # persona 注入采用 marker 块幂等方案：注入/还原只操作标记块，
+        # 不依赖启动时 deep copy 与位置 zip。
         self._inject_into_personas()  # 首次尝试注入（DB 可能为空）
 
     # ---------- 初始化 ----------
@@ -1019,6 +1022,21 @@ class VectorMemePlugin(Star):
         )
         counts = db.count_by_tag()
         stale_tags = self._sync_tag_registry(db)
+
+        # 孤儿向量压缩：index_size 明显大于 DB 引用向量数时重建索引并重映射 id
+        live_vectors = await asyncio.to_thread(db.live_vector_count)
+        orphan_threshold = max(50, int(live_vectors * 0.2))
+        if db.index_size > live_vectors + orphan_threshold:
+            compact = await asyncio.to_thread(db.compact_index)
+            compact_line = (
+                f"- 孤儿向量压缩: index_size={compact['index_size']}, "
+                f"图片向量={compact['image_vectors']}, caption向量={compact['caption_vectors']}\n"
+            )
+        else:
+            compact_line = (
+                f"- 孤儿向量: 无需压缩 (index_size={db.index_size}, 引用向量={live_vectors})\n"
+            )
+
         self._inject_into_personas()
         if self.caption_enabled:
             caption_result = await self._enrich_captions_after_index()
@@ -1027,7 +1045,7 @@ class VectorMemePlugin(Star):
                     'caption: total={total}, ok={ok}, failed={failed}'.format(**caption_result)
                 )
         yield event.plain_result(
-            f"修复完成\n- 清理缺失文件记录: {removed}\n- 注册/确认 tag: {len(counts)}\n- 清理残留 tag: {stale_tags}\n- 已刷新 prompt"
+            f"修复完成\n- 清理缺失文件记录: {removed}\n- 注册/确认 tag: {len(counts)}\n- 清理残留 tag: {stale_tags}\n{compact_line}- 已刷新 prompt"
         )
 
     async def _cmd_auto_classify(self, event: AstrMessageEvent, rest: list[str]):
@@ -1602,48 +1620,45 @@ class VectorMemePlugin(Star):
     # ---------- persona 注入 ----------
 
     def _inject_into_personas(self) -> None:
-        """根据 DB 中现有 tag 列表，把 prompt 注入到每个 persona。
-
-        幂等：每次调用先还原 persona，再重新注入。
-        enable_prompt_injection=False 时只还原不注入。
-        """
+        """根据 DB 中现有 tag 列表，用 marker 块幂等注入 persona prompt。"""
         personas = self.context.provider_manager.personas
-        if not personas or not self._persona_backup:
+        if not personas:
             return
+        block = self._build_prompt_block()
+        for persona in personas:
+            prompt = persona.get("prompt") or ""
+            prompt = PERSONA_INJECT_RE.sub("", prompt)
+            if block:
+                prompt = (prompt.rstrip() + "\n" + block) if prompt else block
+            persona["prompt"] = prompt
+        logger.debug(
+            f"[{PLUGIN_NAME}] 已注入 prompt 到 {len(personas)} 个 persona"
+            f"{'（marker 块）' if block else '（仅清理旧注入）'}"
+        )
 
-        # 1) 先把 persona 还原成原始 prompt（保证幂等 + 实现"关开关时清掉注入"）
-        for persona, persona_backup in zip(personas, self._persona_backup):
-            persona["prompt"] = persona_backup["prompt"]
-
+    def _build_prompt_block(self) -> str:
+        """拼装带 marker 的注入块；关闭注入或无标签时返回空串。"""
         if not self.config.get("enable_prompt_injection", True):
-            return
-
-        # 2) 拼 prompt
+            return ""
         head = self.config.get("prompt_head") or DEFAULT_PROMPT_HEAD
         tail_1 = self.config.get("prompt_tail_1") or DEFAULT_PROMPT_TAIL_1
         tail_2 = self.config.get("prompt_tail_2") or DEFAULT_PROMPT_TAIL_2
         max_n = int(self.config.get("max_per_message", 2))
-
         tag_block = self._build_tag_list_string()
-        self._sys_prompt_add = head + tag_block + tail_1 + str(max_n) + tail_2
-
-        # 3) 重新注入
-        for persona in personas:
-            persona["prompt"] = persona["prompt"] + self._sys_prompt_add
-
-        logger.debug(
-            f"[{PLUGIN_NAME}] 已注入 prompt 到 {len(personas)} 个 persona，"
-            f"tag 数 {tag_block.count(chr(10)) + 1 if tag_block else 0}"
-        )
+        if not tag_block:
+            return ""
+        body = head + tag_block + tail_1 + str(max_n) + tail_2
+        return f"\n{PERSONA_MARKER_START}\n{body}\n{PERSONA_MARKER_END}"
 
     def _restore_personas(self) -> None:
-        """把 persona 还原成原始 prompt（不重新注入）。terminate 时清理用。"""
+        """移除所有 persona 里的 vector_meme marker 注入块。"""
         personas = self.context.provider_manager.personas
-        if not personas or not self._persona_backup:
+        if not personas:
             return
-        for persona, persona_backup in zip(personas, self._persona_backup):
-            persona["prompt"] = persona_backup["prompt"]
-        logger.debug(f"[{PLUGIN_NAME}] 已还原 {len(personas)} 个 persona")
+        for persona in personas:
+            prompt = persona.get("prompt") or ""
+            persona["prompt"] = PERSONA_INJECT_RE.sub("", prompt)
+        logger.debug(f"[{PLUGIN_NAME}] 已移除 {len(personas)} 个 persona 的注入块")
 
     def _build_tag_list_string(self) -> str:
         """从 DB 读 tag 列表，拼成 "- name: description" 形式的纯文本块。"""
@@ -1664,15 +1679,6 @@ class VectorMemePlugin(Star):
             desc = (t.get("description") or "").strip()
             lines.append(f"- {name}: {desc}" if desc else f"- {name}")
         return "\n".join(lines)
-
-    def _strip_placeholders(self, comp: list, plain_indexes: list[int]) -> None:
-        """兼容旧方法：从 Plain 组件里清掉占位符。"""
-        for idx in plain_indexes:
-            c = comp[idx]
-            if isinstance(c, Plain):
-                c.text = VM_TAG_PATTERN.sub("", c.text)
-                if self.config.get("allow_legacy_markup", False):
-                    c.text = LEGACY_TAG_PATTERN.sub("", c.text)
 
     async def terminate(self):
         try:

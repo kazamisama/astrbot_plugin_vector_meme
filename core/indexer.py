@@ -145,7 +145,8 @@ class MemeIndexer:
         progress: IndexProgress | None = None,
     ) -> IndexProgress:
         """索引一个目录（增量）。"""
-        root = Path(root)
+        # 统一存绝对路径，避免 cwd 变化后 DB 里的相对路径失效
+        root = Path(root).resolve()
         progress = progress or IndexProgress()
 
         files = list(iter_image_files(root, recursive=recursive))
@@ -268,7 +269,7 @@ class MemeIndexer:
 
     def remove_missing(self, root: str | Path) -> int:
         """从数据库中移除 root 下已经不存在的文件。"""
-        root = Path(root)
+        root = Path(root).resolve()
         with self.db._conn() as c:  # noqa: SLF001
             rows = c.execute("SELECT id, file_path FROM memes").fetchall()
         removed = 0
