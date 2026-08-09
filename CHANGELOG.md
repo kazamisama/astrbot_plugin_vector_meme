@@ -1,5 +1,20 @@
 # 更新日志
 
+## [0.7.1] - 2026-08-09
+
+### 修复
+- 插件注册版本与 metadata/CHANGELOG 对齐到 0.7.1
+- `/vm 重建` 先备份旧库并先加载 embedder，加载/索引失败时保留恢复入口
+- 空库 + 残留 FAISS 换模型维度时按新维度重建空索引
+- FAISS add/search/reconstruct 统一加锁，新增带锁检索/重建接口
+- 索引进度跨线程写入改为 call_soon_threadsafe
+- 检索改为命中后取行，消除全量预取和超长 IN 子句上限
+- persona 注入改为 marker 幂等块，移除一次性备份和位置 zip 依赖
+- `/vm 修复` 自动压缩孤儿向量并重映射 vector_id / caption_vector_id
+- 修复 migrate_config_v041.py CONFIG_FILE 未定义与 UTF-8 BOM 读取
+- 索引路径统一存绝对路径；移除死代码
+- 新增 pytest 核心测试（dev-only）
+
 ## [0.7.0] - 2026-08-02
 
 ### 新增

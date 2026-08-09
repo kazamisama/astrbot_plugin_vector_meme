@@ -100,7 +100,7 @@ PERSONA_INJECT_RE = re.compile(
     PLUGIN_NAME,
     "chiriu & 橘雪莉",
     "基于向量检索的智能表情包插件",
-    "0.6.9",
+    "0.7.1",
 )
 class VectorMemePlugin(Star):
     def __init__(self, context: Context, config: dict | None = None):

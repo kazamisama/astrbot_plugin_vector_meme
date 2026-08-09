@@ -67,7 +67,7 @@ class DualRetriever(MemeRetriever):
         search_k = min(max(int(topk), self.candidate_pool_size), len(candidates))
         sims, found = self.db.search_index(q, search_k, ids=cap_ids)
         out: dict[int, float] = {}
-        for sim, vid in zip(sims[0], found[0]):
+        for sim, vid in zip(sims, found):
             if int(vid) < 0:
                 continue
             mid = cvid_to_mid.get(int(vid))
