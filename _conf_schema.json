@@ -152,7 +152,7 @@
         "description": "检索重排序时加入的小随机扰动",
         "type": "float",
         "default": 0.015,
-        "hint": "用于打散相近分数候选。0 表示关闭"
+        "hint": "仅影响排序扰动，不控制是否随机选图；选图随机由 enable_stochastic_selection 控制。0 表示关闭"
       }
     }
   },
@@ -187,16 +187,7 @@
         "type": "string",
         "default": ""
       },
-      "trigger_probability": {
-        "description": "LLM 输出情绪标签时实际发送表情的概率（%）",
-        "type": "int",
-        "default": 80,
-        "slider": {
-          "min": 0,
-          "max": 100,
-          "step": 5
-        }
-      },
+
       "enable_mixed_message": {
         "description": "自动表情是否混合到同一条回复中",
         "type": "bool",

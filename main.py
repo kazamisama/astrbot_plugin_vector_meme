@@ -39,6 +39,9 @@ except Exception:
 
 PLUGIN_NAME = "vector_meme"
 
+# embedder 加载前的临时向量维度，真实维度以 embedder 为准
+INIT_TEMP_DIM = 512
+
 # 默认占位符格式：%%<tag>%%
 # 可选兼容旧格式：&&<tag>&& 或 :<tag>:（见 allow_legacy_markup 配置）
 VM_TAG_PATTERN = re.compile(r"%%\s*([a-zA-Z0-9_\-一-鿿]+)\s*%%")
@@ -100,7 +103,7 @@ PERSONA_INJECT_RE = re.compile(
     PLUGIN_NAME,
     "chiriu & 橘雪莉",
     "基于向量检索的智能表情包插件",
-    "0.7.1",
+    "0.7.2",
 )
 class VectorMemePlugin(Star):
     def __init__(self, context: Context, config: dict | None = None):
@@ -158,11 +161,10 @@ class VectorMemePlugin(Star):
     def _init_storage(self) -> None:
         """先以 dummy 维度建库，等 embedder 准备好再对齐。"""
         # 临时 dim，等真 embedder 加载后会重置
-        temp_dim = int(self.config.get("_temp_dim", 512))
         self._db = MemeDatabase(
             db_path=self.data_dir / "memes.db",
             index_path=self.data_dir / "memes.faiss",
-            dim=temp_dim,
+            dim=INIT_TEMP_DIM,
         )
 
     async def _ensure_embedder(self, for_rebuild: bool = False) -> BaseEmbedder:
@@ -1429,13 +1431,6 @@ class VectorMemePlugin(Star):
                     component.text = _clean_text(component.text)
 
             if not tags:
-                return
-
-            # 概率判定放在 decorating 阶段
-            import random
-            prob = int(self.config.get("trigger_probability", 80))
-            if random.randint(1, 100) > prob:
-                event.set_extra("vector_meme_pending_tags", None)
                 return
 
             ready = await self._ensure_ready()

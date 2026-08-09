@@ -12,10 +12,10 @@ def test_version_consistency():
     main_src = (ROOT / "main.py").read_text(encoding="utf-8")
     meta = (ROOT / "metadata.yaml").read_text(encoding="utf-8")
     changelog = (ROOT / "CHANGELOG.md").read_text(encoding="utf-8")
-    assert '"0.7.1"' in main_src
-    assert re.search(r"^version:\s*0\.7\.1\s*$", meta, re.MULTILINE)
+    assert '"0.7.2"' in main_src
+    assert re.search(r"^version:\s*0\.7\.2\s*$", meta, re.MULTILINE)
     assert changelog.startswith("# 更新日志")
-    assert "## [0.7.1]" in changelog
+    assert "## [0.7.2]" in changelog
 
 
 def test_migrate_script_defines_config_file():
@@ -62,7 +62,6 @@ def _make_plugin(tmp_path, personas, main_module):
             "data_dir": str(tmp_path / "data"),
             "meme_dir": str(meme_dir),
             "embedder_backend": "dummy",
-            "_temp_dim": 8,
             "enable_prompt_injection": True,
         },
     )
@@ -84,7 +83,7 @@ def test_persona_marker_injection_idempotent(tmp_path, main_module):
 def test_rebuild_preserves_db_when_embedder_fails(tmp_path, monkeypatch, main_module):
     plugin = _make_plugin(tmp_path, [], main_module)
     db = plugin._db
-    vids = db.add_vectors(np.ones((1, 8), dtype="float32"))
+    vids = db.add_vectors(np.ones((1, 512), dtype="float32"))
     db.upsert_meme("old.png", "h", "happy", int(vids[0]))
     db.save_index()
     db_path = plugin.data_dir / "memes.db"

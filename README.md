@@ -1,6 +1,6 @@
 # astrbot_plugin_vector_meme
 
-基于向量检索的 AstrBot 智能表情包插件，当前版本 **0.7.1**。
+基于向量检索的 AstrBot 智能表情包插件，当前版本 **0.7.2**。
 
 插件用 CLIP/OpenCLIP 把表情图片编码为向量。LLM 只需要在回复里输出情绪/场景占位符（`%%happy%%`）或配合 XML 结构化输出插件输出 `<sticker>happy</sticker>` 标记，具体发送哪张图由向量相似度、标签权重、反重复策略和随机采样共同决定。
 
@@ -81,7 +81,6 @@ memes/
   "data_dir": "",
   "allow_legacy_markup": false,
   "enable_prompt_injection": true,
-  "trigger_probability": 80,
   "max_per_message": 2,
   "enable_mixed_message": true,
   "query_text_max_length": 80,
@@ -175,7 +174,6 @@ python scripts/copy_meme_manager_library.py
 
 插件移除占位符，并按回复文本检索一张匹配的 `happy` 表情。发送行为受这些配置影响：
 
-- `trigger_probability`：实际触发概率（默认 80%）
 - `max_per_message`：单条消息最多表情数
 - `enable_mixed_message`：图文混合发送，或先文本后补图
 - `query_text_max_length`：检索用文本截断长度，避免长回复稀释语义
@@ -211,8 +209,8 @@ python scripts/copy_meme_manager_library.py
 关键配置：
 
 - `selection_pool_size`：进入加权采样的候选池大小，推荐 8-16。
-- `enable_stochastic_selection`：关闭后固定选最高分。
-- `selection_random_jitter`：相近分数候选的扰动幅度，0 关闭。
+- `enable_stochastic_selection`：控制是否随机选图；关闭后固定选最高分。
+- `selection_random_jitter`：仅影响排序扰动，不控制是否随机选图；0 关闭。
 - `anti_repeat_window`：同一张图多少条消息内不重复使用。
 
 ## 标签治理与自动分类
