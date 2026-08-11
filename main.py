@@ -103,7 +103,7 @@ PERSONA_INJECT_RE = re.compile(
     PLUGIN_NAME,
     "chiriu & 橘雪莉",
     "基于向量检索的智能表情包插件",
-    "0.7.2",
+    "0.7.3",
 )
 class VectorMemePlugin(Star):
     def __init__(self, context: Context, config: dict | None = None):
@@ -1535,8 +1535,9 @@ class VectorMemePlugin(Star):
           high-frequency calls never pollute the internal dedup pool.
         - Cold embedder triggers one lazy load via _ensure_ready(); subsequent
           calls reuse the warm embedder.
-        - Whole call is bounded by a 30s timeout (embed + DB query included),
-          aligned with the api embedder's internal 60s limit.
+        - The search portion (embed + DB query) is bounded by a 30s timeout,
+          aligned with the api embedder's internal 60s limit. The cold embedder
+          lazy load happens before that timeout and can take much longer.
         - user_id / scope_id are reserved for future per-user dedup; v1 ignores
           them because the internal dedup window is global, not per-user.
 
