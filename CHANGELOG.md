@@ -1,5 +1,16 @@
 # 更新日志
 
+## [0.7.4] - 2026-08-13
+
+### 修复
+- 统一写操作互斥，覆盖索引/重建/修复/caption/删除/重标注，降低并发 DB/FAISS 不一致风险
+- 重建改为临时库构建成功后替换，失败保持原库
+- compact_index 原子化，避免索引替换与 DB 重映射之间的错位窗口
+- DualRetriever 图片/caption 路径取并集；caption-only 结果也走反重复/使用次数惩罚
+- FAISS 读取失败标记索引损坏，健康检查增加 caption_vector_id 校验
+- 检索候选查询瘦身，降低大图库下的内存/IO 压力
+- pytest 根目录仅收集 tests，避免 scripts/test_openclip_load.py 被误收集
+
 ## [0.7.3] - 2026-08-11
 
 ### 修复

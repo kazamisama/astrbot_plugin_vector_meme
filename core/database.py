@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import sqlite3
 import threading
 import time
@@ -24,6 +25,8 @@ try:
     FAISS_AVAILABLE = True
 except ImportError:
     FAISS_AVAILABLE = False
+
+logger = logging.getLogger(__name__)
 
 
 SCHEMA = """
@@ -100,6 +103,7 @@ class MemeDatabase:
         self.index_path = Path(index_path) if index_path else self.db_path.with_suffix(".faiss")
         self.dim = dim
         self._lock = threading.RLock()
+        self.index_corrupted = False
         self._init_db()
         self._index = self._load_or_create_index()
         # 如果索引里有向量但库里没有，优先信任库（启动时会做一次同步）
@@ -138,8 +142,10 @@ class MemeDatabase:
                     # 维度不匹配：采用文件实际维度，避免建空索引导致检索全空
                     self.dim = idx.d
                 return idx
-            except Exception:
-                pass
+            except Exception as exc:
+                logger.error("FAISS index load failed for %s: %s", self.index_path, exc)
+                self.index_corrupted = True
+                return faiss.IndexFlatIP(self.dim)
         # 用内积（IP）+ 归一化向量 = 余弦相似度
         return faiss.IndexFlatIP(self.dim)
 
@@ -168,6 +174,7 @@ class MemeDatabase:
     def reset_index(self) -> None:
         """用当前维度新建空索引（带锁），用于重建。"""
         with self._lock:
+            self.index_corrupted = False
             self._index = faiss.IndexFlatIP(self.dim)
 
     def search(self, query: np.ndarray, topk: int = 10) -> tuple[np.ndarray, np.ndarray]:
@@ -335,6 +342,44 @@ class MemeDatabase:
         with self._conn() as c:
             rows = c.execute(sql, params).fetchall()
             return [dict(r) for r in rows]
+
+    def list_candidate_vector_ids(self, tag: str | None = None) -> list[tuple[int, int]]:
+        sql = "SELECT id, vector_id FROM memes WHERE disabled = 0"
+        params: list[Any] = []
+        if tag:
+            sql += " AND tag = ?"
+            params.append(tag)
+        with self._conn() as c:
+            rows = c.execute(sql, params).fetchall()
+        max_size = self.index_size
+        out: list[tuple[int, int]] = []
+        for r in rows:
+            try:
+                vid = int(r["vector_id"])
+            except Exception:
+                continue
+            if 0 <= vid < max_size:
+                out.append((vid, int(r["id"])))
+        return out
+
+    def list_caption_vector_ids(self, tag: str | None = None) -> list[tuple[int, int]]:
+        sql = "SELECT id, caption_vector_id FROM memes WHERE disabled = 0"
+        params: list[Any] = []
+        if tag:
+            sql += " AND tag = ?"
+            params.append(tag)
+        with self._conn() as c:
+            rows = c.execute(sql, params).fetchall()
+        max_size = self.index_size
+        out: list[tuple[int, int]] = []
+        for r in rows:
+            try:
+                cvid = int(r["caption_vector_id"]) if r["caption_vector_id"] is not None else -1
+            except Exception:
+                continue
+            if 0 <= cvid < max_size:
+                out.append((cvid, int(r["id"])))
+        return out
 
     def count_by_tag(self) -> dict[str, int]:
         with self._conn() as c:
@@ -531,16 +576,18 @@ class MemeDatabase:
                 arr = np.stack(caption_vectors).astype("float32")
                 faiss.normalize_L2(arr)
                 new_index.add(arr)
+
+            with self._conn() as c:
+                for i, r in enumerate(image_rows):
+                    c.execute("UPDATE memes SET vector_id = ? WHERE id = ?", (i, int(r["id"])))
+                for j, r in enumerate(caption_rows):
+                    c.execute(
+                        "UPDATE memes SET caption_vector_id = ? WHERE id = ?",
+                        (len(image_vectors) + j, int(r["id"])),
+                    )
             self._index = new_index
 
-        with self._conn() as c:
-            for i, r in enumerate(image_rows):
-                c.execute("UPDATE memes SET vector_id = ? WHERE id = ?", (i, int(r["id"])))
-            for j, r in enumerate(caption_rows):
-                c.execute(
-                    "UPDATE memes SET caption_vector_id = ? WHERE id = ?",
-                    (len(image_vectors) + j, int(r["id"])),
-                )
+        self.index_corrupted = False
         self.save_index()
         return {
             "index_size": self.index_size,
@@ -559,6 +606,7 @@ class MemeDatabase:
             "tags": tags,
             "index_size": self.index_size,
             "dim": self.dim,
+            "index_corrupted": self.index_corrupted,
         }
 
     def health_check(self, root: str | Path | None = None) -> dict:
@@ -576,6 +624,7 @@ class MemeDatabase:
         missing_files = []
         orphan_outside_root = []
         bad_vector_ids = []
+        bad_caption_vector_ids = []
         root_path = Path(root).resolve() if root else None
         for r in active:
             p = Path(r["file_path"])
@@ -592,6 +641,13 @@ class MemeDatabase:
                 vid = -1
             if vid < 0 or vid >= self.index_size:
                 bad_vector_ids.append({"id": r["id"], "vector_id": r["vector_id"]})
+            if r["caption_vector_id"] is not None:
+                try:
+                    cvid = int(r["caption_vector_id"])
+                except Exception:
+                    cvid = -1
+                if cvid < 0 or cvid >= self.index_size:
+                    bad_caption_vector_ids.append({"id": r["id"], "caption_vector_id": r["caption_vector_id"]})
         duplicate_hashes = [{"file_hash": r["file_hash"], "count": r["n"]} for r in duplicate_hash_rows]
         unregistered_tags = sorted(t for t in used_tags if t not in known_tags)
         index_mismatch = self.index_size < len(active)
@@ -606,7 +662,13 @@ class MemeDatabase:
                 if 0 <= vid < max_size:
                     live_vectors += 1
         orphan_vector_count = max(max_size - live_vectors, 0)
-        ok = not (missing_files or bad_vector_ids or index_mismatch)
+        ok = not (
+            missing_files
+            or bad_vector_ids
+            or bad_caption_vector_ids
+            or index_mismatch
+            or self.index_corrupted
+        )
         return {
             "ok": ok,
             "total": len(active),
@@ -615,6 +677,7 @@ class MemeDatabase:
             "registered_tag_count": len(known_tags),
             "index_size": self.index_size,
             "dim": self.dim,
+            "index_corrupted": self.index_corrupted,
             "index_mismatch": index_mismatch,
             "orphan_vector_count": orphan_vector_count,
             "live_vector_count": live_vectors,
@@ -622,6 +685,8 @@ class MemeDatabase:
             "missing_files_count": len(missing_files),
             "bad_vector_ids": bad_vector_ids,
             "bad_vector_ids_count": len(bad_vector_ids),
+            "bad_caption_vector_ids": bad_caption_vector_ids,
+            "bad_caption_vector_ids_count": len(bad_caption_vector_ids),
             "duplicate_hashes": duplicate_hashes,
             "duplicate_hash_count": len(duplicate_hashes),
             "unregistered_tags": unregistered_tags,

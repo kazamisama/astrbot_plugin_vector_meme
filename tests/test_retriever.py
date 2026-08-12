@@ -41,6 +41,20 @@ def test_retrieve_fallback_when_tag_missing(library):
     assert len(res.hits) == 1
 
 
+def test_dual_retriever_caption_only_applies_rerank(tmp_path):
+    db = MemeDatabase(tmp_path / "m.db", tmp_path / "m.faiss", dim=16)
+    emb = DummyEmbedder(16, seed=11)
+    cap_ids = db.add_vectors(np.stack([emb.embed_text("smiling cat")]))
+    mid = db.upsert_meme(str(tmp_path / "a.png"), "a", "happy", -1)
+    db.set_meme_caption(mid, "smiling cat", int(cap_ids[0]))
+    db.mark_used(mid)
+    retriever = DualRetriever(db, emb, caption_weight=1.0, candidate_pool_size=2, random_jitter=0.0)
+    res = retriever.retrieve("smiling cat", tag="happy", topk=1)
+    assert res.hits
+    assert res.hits[0].meme_id == mid
+    assert res.hits[0].repeat_penalty > 0
+
+
 def test_dual_retriever_uses_caption_path(tmp_path):
     db = MemeDatabase(tmp_path / "m.db", tmp_path / "m.faiss", dim=16)
     emb = DummyEmbedder(16, seed=9)

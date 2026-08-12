@@ -38,6 +38,8 @@ class MemeHit:
     random_jitter: float = 0.0
     fallback_used: bool = False
     rank_before_rerank: int | None = None
+    image_similarity: float | None = None
+    caption_similarity: float | None = None
 
     @property
     def name(self) -> str:
@@ -108,17 +110,7 @@ class MemeRetriever:
 
     def _candidate_vector_ids(self, tag: str | None) -> list[tuple[int, int]]:
         """返回 [(vector_id, meme_id)]，自动过滤越界或无效 vector_id。"""
-        rows = self.db.list_memes(tag=tag, limit=10_000_000)
-        max_size = self.db.index_size
-        candidates: list[tuple[int, int]] = []
-        for r in rows:
-            try:
-                vid = int(r["vector_id"])
-            except Exception:
-                continue
-            if 0 <= vid < max_size:
-                candidates.append((vid, int(r["id"])))
-        return candidates
+        return self.db.list_candidate_vector_ids(tag=tag)
 
     def _build_query(self, text: str, tag: str | None) -> str:
         """构造向量查询文本。
@@ -155,10 +147,10 @@ class MemeRetriever:
                     repeat_penalty += 0.35
                 if h.last_used_at:
                     elapsed = now - h.last_used_at
-                    if elapsed < 600:
-                        repeat_penalty += 0.20 * (1 - elapsed / 600)
-                    elif elapsed < 3600:
-                        repeat_penalty += 0.05 * (1 - (elapsed - 600) / 3000)
+                    if elapsed < 3600:
+                        repeat_penalty += 0.05 * (1 - elapsed / 3600)
+                        if elapsed < 600:
+                            repeat_penalty += 0.15 * (1 - elapsed / 600)
                 if h.usage_count > 0:
                     usage_penalty += min(0.025 * h.usage_count, 0.15)
 
@@ -190,10 +182,11 @@ class MemeRetriever:
         topk: int = 5,
         anti_repeat: bool = True,
         fallback_to_all_tags: bool = True,
+        query_vector: np.ndarray | None = None,
     ) -> RetrievalResult:
         """用文本检索最匹配的表情。"""
         query_text = self._build_query(text, tag)
-        qvec = self.embedder.embed_text(query_text)
+        qvec = query_vector if query_vector is not None else self.embedder.embed_text(query_text)
 
         candidates = self._candidate_vector_ids(tag)
         used_fallback = False

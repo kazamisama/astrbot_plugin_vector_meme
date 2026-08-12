@@ -40,17 +40,7 @@ class DualRetriever(MemeRetriever):
 
     def _caption_candidates(self, tag: str | None) -> list[tuple[int, int]]:
         """Return [(caption_vector_id, meme_id)] filtered to valid FAISS ids."""
-        rows = self.db.list_memes(tag=tag, limit=10_000_000)
-        max_size = self.db.index_size
-        result: list[tuple[int, int]] = []
-        for row in rows:
-            try:
-                cvid = int(row['caption_vector_id'])
-            except Exception:
-                continue
-            if cvid >= 0 and cvid < max_size:
-                result.append((cvid, int(row['id'])))
-        return result
+        return self.db.list_caption_vector_ids(tag=tag)
 
     def _search_caption_path(
         self,
@@ -130,17 +120,20 @@ class DualRetriever(MemeRetriever):
         anti_repeat: bool = True,
         fallback_to_all_tags: bool = True,
     ) -> Any:
+        internal_topk = max(int(topk), self.candidate_pool_size)
+        query_text = self._build_query(text, tag)
+        query_vector = self.embedder.embed_text(query_text)
         base = super().retrieve(
             text=text,
             tag=tag,
-            topk=topk,
+            topk=internal_topk,
             anti_repeat=anti_repeat,
             fallback_to_all_tags=fallback_to_all_tags,
+            query_vector=query_vector,
         )
         if self.caption_weight <= 0:
             return base
 
-        # caption 候选集与图片路保持同一 tag 语义（fallback 同规则）
         cap_candidates = self._caption_candidates(tag)
         cap_fallback = False
         if not cap_candidates and fallback_to_all_tags:
@@ -149,14 +142,18 @@ class DualRetriever(MemeRetriever):
         if not cap_candidates:
             return base
 
-        query_vector = self.embedder.embed_text(self._build_query(text, tag))
-        cap_scores = self._search_caption_path(query_vector, cap_candidates, topk)
+        cap_scores = self._search_caption_path(query_vector, cap_candidates, internal_topk)
         if not cap_scores:
             return base
 
+        caption_hits = self._caption_hits(cap_scores, internal_topk, fallback_used=cap_fallback)
         if not base.hits:
-            # api 后端：图片路无向量，检索结果完全来自 caption 路
-            base.hits = self._caption_hits(cap_scores, topk, fallback_used=cap_fallback)
+            base.hits = self._rerank(
+                caption_hits,
+                anti_repeat=anti_repeat,
+                requested_tag=base.original_tag,
+                fallback_used=cap_fallback,
+            )[:max(int(topk), 0)]
             base.used_fallback = cap_fallback
             if base.hits:
                 self.db.log_search(
@@ -170,35 +167,47 @@ class DualRetriever(MemeRetriever):
 
         w_cap = self.caption_weight
         w_img = 1.0 - w_cap
+        base_by_id = {h.meme_id: h for h in base.hits}
+        cap_by_id = {h.meme_id: h for h in caption_hits}
+        all_ids = set(base_by_id) | set(cap_by_id)
         img_scores = {
-            h.meme_id: (h.raw_similarity if h.raw_similarity is not None else h.similarity)
-            for h in base.hits
+            mid: (base_by_id[mid].raw_similarity if base_by_id[mid].raw_similarity is not None else base_by_id[mid].similarity)
+            for mid in all_ids
+            if mid in base_by_id
+        }
+        cap_scores_by_id = {
+            mid: (cap_by_id[mid].raw_similarity if cap_by_id[mid].raw_similarity is not None else cap_by_id[mid].similarity)
+            for mid in all_ids
+            if mid in cap_by_id
         }
         norm_img = self._minmax(img_scores)
-        norm_cap = self._minmax(cap_scores)
-        fused: dict[int, float] = {}
-        for h in base.hits:
-            mid = h.meme_id
-            img_s = norm_img.get(mid)
-            cap_s = norm_cap.get(mid)
-            if img_s is None:
-                continue
-            cap_part = 0.0 if cap_s is None else w_cap * float(cap_s)
-            fused[mid] = w_img * float(img_s) + cap_part
+        norm_cap = self._minmax(cap_scores_by_id)
 
-        # 按融合分稳定排序；分数相同按原图片路分兜底
-        order = sorted(
-            base.hits,
-            key=lambda h: (fused.get(h.meme_id, 0.0), img_scores.get(h.meme_id, 0.0)),
-            reverse=True,
+        fused_hits = []
+        for mid in all_ids:
+            source = base_by_id.get(mid) or cap_by_id.get(mid)
+            img_s = norm_img.get(mid, 0.0)
+            cap_s = norm_cap.get(mid, 0.0)
+            fused_raw = w_img * float(img_s) + w_cap * float(cap_s)
+            fused_hits.append(MemeHit(
+                meme_id=mid,
+                file_path=source.file_path,
+                tag=source.tag,
+                similarity=fused_raw,
+                usage_count=source.usage_count,
+                last_used_at=source.last_used_at,
+                description=source.description,
+                raw_similarity=fused_raw,
+                fallback_used=(source.fallback_used or cap_fallback),
+                rank_before_rerank=source.rank_before_rerank,
+                image_similarity=img_scores.get(mid),
+                caption_similarity=cap_scores_by_id.get(mid),
+            ))
+
+        base.hits = self._rerank(
+            fused_hits,
+            anti_repeat=anti_repeat,
+            requested_tag=base.original_tag,
+            fallback_used=(base.used_fallback or cap_fallback),
         )[:max(int(topk), 0)]
-        for h in order:
-            mid = h.meme_id
-            h.image_similarity = float(img_scores.get(mid, h.similarity))
-            h.caption_similarity = cap_scores.get(mid)
-            fused_score = fused.get(mid)
-            if fused_score is not None:
-                h.similarity = fused_score
-                h.raw_similarity = fused_score
-        base.hits = order
         return base

@@ -13,6 +13,7 @@ import json
 import os
 import re
 import shutil
+import tempfile
 from pathlib import Path
 
 from astrbot.api import logger
@@ -103,7 +104,7 @@ PERSONA_INJECT_RE = re.compile(
     PLUGIN_NAME,
     "chiriu & 橘雪莉",
     "基于向量检索的智能表情包插件",
-    "0.7.3",
+    "0.7.4",
 )
 class VectorMemePlugin(Star):
     def __init__(self, context: Context, config: dict | None = None):
@@ -149,6 +150,7 @@ class VectorMemePlugin(Star):
             # api 后端：图片不可直接编码，必须依赖 caption 文本向量
             self.caption_enabled = True
         self._indexer_lock = asyncio.Lock()
+        self._mutation_lock = asyncio.Lock()
 
         self._init_storage()
 
@@ -391,7 +393,7 @@ class VectorMemePlugin(Star):
         if not ready:
             return
         _, indexer, _ = ready
-        async with self._indexer_lock:
+        async with self._mutation_lock:
             await asyncio.to_thread(
                 lambda: indexer.index_directory(self.meme_dir)
             )
@@ -628,7 +630,7 @@ class VectorMemePlugin(Star):
         reporter_done = asyncio.Event()
         reporter_task = asyncio.create_task(_progress_reporter())
         try:
-            async with self._indexer_lock:
+            async with self._mutation_lock:
                 progress = await asyncio.to_thread(
                     lambda: indexer.index_directory(path, progress=IndexProgress(_on_progress)),
                 )
@@ -639,13 +641,14 @@ class VectorMemePlugin(Star):
             except asyncio.TimeoutError:
                 reporter_task.cancel()
         # 索引完成 → 标签列表可能变化 → 重新注入 prompt
-        self._inject_into_personas()
-        if self.caption_enabled:
-            caption_result = await self._enrich_captions_after_index()
-            if caption_result:
-                yield event.plain_result(
-                    'caption: total={total}, ok={ok}, failed={failed}'.format(**caption_result)
-                )
+        async with self._mutation_lock:
+            self._inject_into_personas()
+            if self.caption_enabled:
+                caption_result = await self._enrich_captions_after_index()
+                if caption_result:
+                    yield event.plain_result(
+                        'caption: total={total}, ok={ok}, failed={failed}'.format(**caption_result)
+                    )
         yield event.plain_result(
             f"索引完成\n"
             f"- 新增: {progress.added}\n"
@@ -758,23 +761,73 @@ class VectorMemePlugin(Star):
 
         reporter_done = asyncio.Event()
         reporter_task = asyncio.create_task(_progress_reporter())
+        tmp_dir = Path(tempfile.mkdtemp(prefix="vector_meme_rebuild_", dir=self.data_dir))
+        tmp_db_path = tmp_dir / "memes.db"
+        tmp_index_path = tmp_dir / "memes.faiss"
         try:
-            async with self._indexer_lock:
-                with indexer.db._conn() as c:  # noqa: SLF001
-                    c.execute("DELETE FROM memes")
-                if indexer.db.index_path.exists():
-                    indexer.db.index_path.unlink()
-                indexer.db.reset_index()
-                progress = await asyncio.to_thread(
-                    lambda: indexer.index_directory(path, progress=IndexProgress(_on_progress))
+            async with self._mutation_lock:
+                tmp_db = MemeDatabase(tmp_db_path, tmp_index_path, dim=self._embedder.dim)
+                tmp_indexer = MemeIndexer(
+                    tmp_db,
+                    self._embedder,
+                    use_subdir_as_tag=bool(self.config.get("use_subdir_as_tag", True)),
+                    default_tag=self.config.get("default_tag", "misc"),
+                    tag_schema=self._load_tag_schema(),
                 )
+                progress = await asyncio.to_thread(
+                    lambda: tmp_indexer.index_directory(path, progress=IndexProgress(_on_progress))
+                )
+                if self.caption_enabled:
+                    captioner = self._ensure_captioner()
+                    external = self._load_external_captions()
+                    if captioner.available() or external:
+                        await enrich_meme_captions(
+                            tmp_db,
+                            self._embedder,
+                            captioner,
+                            limit=int(self.config.get("caption_batch_limit", 500)),
+                            external_captions=external,
+                        )
+                    else:
+                        logger.warning(f"[{PLUGIN_NAME}] vision caption enabled but provider unavailable during rebuild")
+                tmp_db.save_index()
+
+                old_db = self._db
+                try:
+                    os.replace(tmp_db_path, old_db.db_path)
+                    os.replace(tmp_index_path, old_db.index_path)
+                except Exception:
+                    for original, backup in backup_paths:
+                        shutil.copy2(backup, original)
+                    raise
+
+                self._db = MemeDatabase(old_db.db_path, old_db.index_path, dim=self._embedder.dim)
+                self._indexer = MemeIndexer(
+                    self._db,
+                    self._embedder,
+                    use_subdir_as_tag=bool(self.config.get("use_subdir_as_tag", True)),
+                    default_tag=self.config.get("default_tag", "misc"),
+                    tag_schema=self._load_tag_schema(),
+                )
+                retriever_cls = DualRetriever if self.caption_enabled else MemeRetriever
+                self._retriever = retriever_cls(
+                    self._db,
+                    self._embedder,
+                    anti_repeat_window=int(self.config.get("anti_repeat_window", 20)),
+                    candidate_pool_size=int(self.config.get("selection_pool_size", 12)),
+                    random_jitter=float(self.config.get("selection_random_jitter", 0.015)),
+                )
+                if self.caption_enabled and hasattr(self._retriever, "caption_weight"):
+                    if self._backend_name == "api":
+                        self._retriever.caption_weight = 1.0
+                    else:
+                        self._retriever.caption_weight = float(self.config.get("caption_score_weight", 0.6))
+
+                self._sync_tag_registry(self._db)
+                self._inject_into_personas()
         except Exception:
-            logger.exception("重建：索引进程失败，旧库备份保留")
-            backup_hint = ", ".join(str(bak) for _, bak in backup_paths) or "无"
-            yield event.plain_result(
-                "重建失败，已保留重建前备份。恢复方法：停止 AstrBot，删除 memes.db / memes.faiss，"
-                f"把以下文件改回原名后重启: {backup_hint}"
-            )
+            logger.exception("rebuild failed; old library preserved")
+            yield event.plain_result("\u91cd\u5efa\u5931\u8d25\uff0c\u539f\u5e93\u672a\u53d7\u5f71\u54cd\u3002")
             return
         finally:
             reporter_done.set()
@@ -782,23 +835,14 @@ class VectorMemePlugin(Star):
                 await asyncio.wait_for(reporter_task, timeout=3.0)
             except asyncio.TimeoutError:
                 reporter_task.cancel()
-        # 重建成功：清理备份
-        for _, bak in backup_paths:
-            try:
-                bak.unlink(missing_ok=True)
-            except Exception as e:
-                logger.warning(f"[{PLUGIN_NAME}] 删除重建备份失败 {bak}: {e}")
-        # 重建完成 → 标签列表已变 → 同步 schema 并清理残留 → 重新注入
-        self._sync_tag_registry(indexer.db)
-        self._inject_into_personas()
-        if self.caption_enabled:
-            caption_result = await self._enrich_captions_after_index()
-            if caption_result:
-                yield event.plain_result(
-                    'caption: total={total}, ok={ok}, failed={failed}'.format(**caption_result)
-                )
+            shutil.rmtree(tmp_dir, ignore_errors=True)
+            for _, bak in backup_paths:
+                try:
+                    bak.unlink(missing_ok=True)
+                except Exception as e:
+                    logger.warning(f"[{PLUGIN_NAME}] remove backup failed {bak}: {e}")
         yield event.plain_result(
-            f"重建完成，共处理 {progress.total} 张（新增 {progress.added}）"
+            f"\u91cd\u5efa\u5b8c\u6210\uff0c\u5171\u5904\u7406 {progress.total} \u5f20\uff08\u65b0\u589e {progress.added}\uff09"
         )
 
     async def _cmd_list(self, event: AstrMessageEvent, rest: list[str]):
@@ -966,10 +1010,12 @@ class VectorMemePlugin(Star):
             f"[{PLUGIN_NAME}] 健康检查: {'OK' if h['ok'] else 'WARN'}",
             f"- DB有效表情: {h['total']}（禁用 {h['disabled']}）",
             f"- FAISS向量数: {h['index_size']} / dim={h['dim']}",
+            f"- 索引损坏: {'yes' if h['index_corrupted'] else 'no'}",
             f"- 标签: 使用中 {h['tag_count']} / 注册 {h['registered_tag_count']}",
             f"- 索引数量不足: {'yes' if h['index_mismatch'] else 'no'}",
             f"- 文件缺失: {h['missing_files_count']}",
             f"- vector_id异常: {h['bad_vector_ids_count']}",
+            f"- caption_vector_id异常: {h['bad_caption_vector_ids_count']}",
             f"- 重复hash组: {h['duplicate_hash_count']}",
             f"- root外孤儿记录: {h['orphan_outside_root_count']}",
         ]
@@ -1019,36 +1065,37 @@ class VectorMemePlugin(Star):
             yield event.plain_result("embedder 未就绪")
             return
         _, indexer, db = ready
-        removed = await asyncio.to_thread(
-            lambda: indexer.remove_missing(self.meme_dir)
-        )
-        counts = db.count_by_tag()
-        stale_tags = self._sync_tag_registry(db)
-
-        # 孤儿向量压缩：index_size 明显大于 DB 引用向量数时重建索引并重映射 id
-        live_vectors = await asyncio.to_thread(db.live_vector_count)
-        orphan_threshold = max(50, int(live_vectors * 0.2))
-        if db.index_size > live_vectors + orphan_threshold:
-            compact = await asyncio.to_thread(db.compact_index)
-            compact_line = (
-                f"- 孤儿向量压缩: index_size={compact['index_size']}, "
-                f"图片向量={compact['image_vectors']}, caption向量={compact['caption_vectors']}\n"
+        async with self._mutation_lock:
+            removed = await asyncio.to_thread(
+                lambda: indexer.remove_missing(self.meme_dir)
             )
-        else:
-            compact_line = (
-                f"- 孤儿向量: 无需压缩 (index_size={db.index_size}, 引用向量={live_vectors})\n"
-            )
+            counts = db.count_by_tag()
+            stale_tags = self._sync_tag_registry(db)
 
-        self._inject_into_personas()
-        if self.caption_enabled:
-            caption_result = await self._enrich_captions_after_index()
-            if caption_result:
-                yield event.plain_result(
-                    'caption: total={total}, ok={ok}, failed={failed}'.format(**caption_result)
+            live_vectors = await asyncio.to_thread(db.live_vector_count)
+            orphan_threshold = max(50, int(live_vectors * 0.2))
+            if db.index_size > live_vectors + orphan_threshold:
+                compact = await asyncio.to_thread(db.compact_index)
+                compact_line = (
+                    f"- orphan compaction: index_size={compact['index_size']}, "
+                    f"image_vectors={compact['image_vectors']}, caption_vectors={compact['caption_vectors']}\n"
                 )
+            else:
+                compact_line = (
+                    f"- orphan vectors: no compaction needed (index_size={db.index_size}, referenced={live_vectors})\n"
+                )
+
+            self._inject_into_personas()
+            if self.caption_enabled:
+                caption_result = await self._enrich_captions_after_index()
+                if caption_result:
+                    yield event.plain_result(
+                        'caption: total={total}, ok={ok}, failed={failed}'.format(**caption_result)
+                    )
         yield event.plain_result(
-            f"修复完成\n- 清理缺失文件记录: {removed}\n- 注册/确认 tag: {len(counts)}\n- 清理残留 tag: {stale_tags}\n{compact_line}- 已刷新 prompt"
+            f"\u4fee\u590d\u5b8c\u6210\n- \u6e05\u7406\u7f3a\u5931\u6587\u4ef6\u8bb0\u5f55: {removed}\n- \u6ce8\u518c/\u786e\u8ba4 tag: {len(counts)}\n- \u6e05\u7406\u6b8b\u7559 tag: {stale_tags}\n{compact_line}- \u5df2\u5237\u65b0 prompt"
         )
+
 
     async def _cmd_auto_classify(self, event: AstrMessageEvent, rest: list[str]):
         """prototype + KNN 自动分类。默认 dry-run；加 apply 才改数据库 tag。"""
@@ -1102,9 +1149,11 @@ class VectorMemePlugin(Star):
             elif best["tag"] == row["tag"]:
                 lines.append("无需修改：建议 tag 与当前 tag 相同。")
             else:
-                ok, old, new = db.relabel_meme(meme_id, best["tag"], keep_old_as_subtag=True)
+                async with self._mutation_lock:
+                    ok, old, new = db.relabel_meme(meme_id, best["tag"], keep_old_as_subtag=True)
+                    if ok:
+                        self._inject_into_personas()
                 lines.append(f"已修改数据库 tag: {old} -> {new}" if ok else "修改失败")
-                self._inject_into_personas()
         else:
             lines.append("dry-run：加 apply 才会修改数据库 tag，不会移动文件。")
         yield event.plain_result("\n".join(lines))
@@ -1212,7 +1261,8 @@ class VectorMemePlugin(Star):
             return
         meme_id = int(rest[0])
         new_tag = rest[1].strip()
-        ok, old, new = db.relabel_meme(meme_id, new_tag, keep_old_as_subtag=True)
+        async with self._mutation_lock:
+            ok, old, new = db.relabel_meme(meme_id, new_tag, keep_old_as_subtag=True)
         if not ok:
             yield event.plain_result(f"重标注失败: id={meme_id}")
             return
@@ -1227,7 +1277,8 @@ class VectorMemePlugin(Star):
         if db is None:
             yield event.plain_result("数据库未初始化")
             return
-        ok = db.remove_meme(int(rest[0]))
+        async with self._mutation_lock:
+            ok = db.remove_meme(int(rest[0]))
         yield event.plain_result("已删除" if ok else "id 不存在")
 
     async def _cmd_reload_prompt(self, event: AstrMessageEvent, rest: list[str]):
@@ -1269,13 +1320,14 @@ class VectorMemePlugin(Star):
                 limit = int(rest[0])
             except Exception:
                 pass
-        result = await enrich_meme_captions(
-            self._db,
-            self._embedder,
-            captioner,
-            limit=limit,
-        )
-        self._db.save_index()
+        async with self._mutation_lock:
+            result = await enrich_meme_captions(
+                self._db,
+                self._embedder,
+                captioner,
+                limit=limit,
+            )
+            self._db.save_index()
         yield event.plain_result(
             'caption done: total={total}, ok={ok}, failed={failed}'.format(**result)
         )

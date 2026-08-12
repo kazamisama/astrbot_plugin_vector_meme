@@ -1,6 +1,6 @@
 # astrbot_plugin_vector_meme
 
-基于向量检索的 AstrBot 智能表情包插件，当前版本 **0.7.3**。
+基于向量检索的 AstrBot 智能表情包插件，当前版本 **0.7.4**。
 
 插件用 CLIP/OpenCLIP 把表情图片编码为向量。LLM 只需要在回复里输出情绪/场景占位符（`%%happy%%`）或配合 XML 结构化输出插件输出 `<sticker>happy</sticker>` 标记，具体发送哪张图由向量相似度、标签权重、反重复策略和随机采样共同决定。
 

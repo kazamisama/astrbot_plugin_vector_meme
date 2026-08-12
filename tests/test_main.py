@@ -12,10 +12,10 @@ def test_version_consistency():
     main_src = (ROOT / "main.py").read_text(encoding="utf-8")
     meta = (ROOT / "metadata.yaml").read_text(encoding="utf-8")
     changelog = (ROOT / "CHANGELOG.md").read_text(encoding="utf-8")
-    assert '"0.7.3"' in main_src
-    assert re.search(r"^version:\s*0\.7\.3\s*$", meta, re.MULTILINE)
+    assert '"0.7.4"' in main_src
+    assert re.search(r"^version:\s*0\.7\.4\s*$", meta, re.MULTILINE)
     assert changelog.startswith("# 更新日志")
-    assert "## [0.7.3]" in changelog
+    assert "## [0.7.4]" in changelog
 
 
 def test_migrate_script_defines_config_file():

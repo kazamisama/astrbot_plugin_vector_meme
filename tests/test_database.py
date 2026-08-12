@@ -50,6 +50,30 @@ def test_health_and_compact_index_removes_orphans(db):
         assert 0 <= row["caption_vector_id"] < db.index_size
 
 
+def test_health_detects_bad_caption_vector_id(db):
+    vids = db.add_vectors(np.ones((1, 8), dtype="float32"))
+    mid = db.upsert_meme("x.png", "h", "happy", int(vids[0]))
+    db.set_meme_caption(mid, "caption", 999)
+    h = db.health_check()
+    assert h["bad_caption_vector_ids_count"] == 1
+    assert not h["ok"]
+
+
+def test_health_does_not_flag_missing_caption_as_bad(db):
+    vids = db.add_vectors(np.ones((1, 8), dtype="float32"))
+    db.upsert_meme("x.png", "h", "happy", int(vids[0]))
+    h = db.health_check()
+    assert h["bad_caption_vector_ids_count"] == 0
+
+
+def test_corrupted_index_is_flagged(tmp_path):
+    index_path = tmp_path / "bad.faiss"
+    index_path.write_text("not a faiss index", encoding="utf-8")
+    db = MemeDatabase(tmp_path / "m.db", index_path, dim=8)
+    assert db.index_corrupted
+    assert db.health_check()["index_corrupted"]
+
+
 def test_relabel_keeps_old_tag_as_subtag(db):
     vids = db.add_vectors(np.ones((1, 8), dtype="float32"))
     mid = db.upsert_meme("r.png", "h", "happy", int(vids[0]))
