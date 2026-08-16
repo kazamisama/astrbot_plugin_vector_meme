@@ -119,6 +119,7 @@ class DualRetriever(MemeRetriever):
         topk: int = 5,
         anti_repeat: bool = True,
         fallback_to_all_tags: bool = True,
+        rerank: bool = True,
     ) -> Any:
         internal_topk = max(int(topk), self.candidate_pool_size)
         query_text = self._build_query(text, tag)
@@ -130,6 +131,7 @@ class DualRetriever(MemeRetriever):
             anti_repeat=anti_repeat,
             fallback_to_all_tags=fallback_to_all_tags,
             query_vector=query_vector,
+            rerank=rerank,
         )
         if self.caption_weight <= 0:
             return base
@@ -148,12 +150,21 @@ class DualRetriever(MemeRetriever):
 
         caption_hits = self._caption_hits(cap_scores, internal_topk, fallback_used=cap_fallback)
         if not base.hits:
-            base.hits = self._rerank(
-                caption_hits,
-                anti_repeat=anti_repeat,
-                requested_tag=base.original_tag,
-                fallback_used=cap_fallback,
-            )[:max(int(topk), 0)]
+            if rerank:
+                base.hits = self._rerank(
+                    caption_hits,
+                    anti_repeat=anti_repeat,
+                    requested_tag=base.original_tag,
+                    fallback_used=cap_fallback,
+                )[:max(int(topk), 0)]
+            else:
+                caption_hits.sort(
+                    key=lambda h: h.raw_similarity
+                    if h.raw_similarity is not None
+                    else h.similarity,
+                    reverse=True,
+                )
+                base.hits = caption_hits[:max(int(topk), 0)]
             base.used_fallback = cap_fallback
             if base.hits:
                 self.db.log_search(
@@ -204,10 +215,14 @@ class DualRetriever(MemeRetriever):
                 caption_similarity=cap_scores_by_id.get(mid),
             ))
 
-        base.hits = self._rerank(
-            fused_hits,
-            anti_repeat=anti_repeat,
-            requested_tag=base.original_tag,
-            fallback_used=(base.used_fallback or cap_fallback),
-        )[:max(int(topk), 0)]
+        if rerank:
+            base.hits = self._rerank(
+                fused_hits,
+                anti_repeat=anti_repeat,
+                requested_tag=base.original_tag,
+                fallback_used=(base.used_fallback or cap_fallback),
+            )[:max(int(topk), 0)]
+        else:
+            fused_hits.sort(key=lambda h: h.similarity, reverse=True)
+            base.hits = fused_hits[:max(int(topk), 0)]
         return base

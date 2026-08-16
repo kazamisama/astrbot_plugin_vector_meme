@@ -140,7 +140,9 @@ async def enrich_meme_captions(
 
     import numpy as np
 
-    pending = db.memes_without_caption(limit=int(limit))
+    # 防止 LIMIT -1 / 0 之类的异常值变成“全库处理”或空跑语义歧义
+    limit = max(int(limit), 0)
+    pending = db.memes_without_caption(limit=limit)
     total = len(pending)
     if total == 0:
         return {'total': 0, 'ok': 0, 'failed': 0}

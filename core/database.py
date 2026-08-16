@@ -11,6 +11,8 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import os
+import shutil
 import sqlite3
 import threading
 import time
@@ -74,6 +76,11 @@ CREATE TABLE IF NOT EXISTS search_log (
     created_at REAL DEFAULT (strftime('%s','now'))
 );
 
+CREATE TABLE IF NOT EXISTS meta (
+    key TEXT PRIMARY KEY,
+    value TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS index_log (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     action TEXT,
@@ -101,6 +108,7 @@ class MemeDatabase:
         self.db_path = Path(db_path)
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self.index_path = Path(index_path) if index_path else self.db_path.with_suffix(".faiss")
+        self.index_path.parent.mkdir(parents=True, exist_ok=True)
         self.dim = dim
         self._lock = threading.RLock()
         self.index_corrupted = False
@@ -150,9 +158,82 @@ class MemeDatabase:
         return faiss.IndexFlatIP(self.dim)
 
     def save_index(self) -> None:
-        if FAISS_AVAILABLE and self._index is not None and self._index.ntotal > 0:
-            with self._lock:
-                faiss.write_index(self._index, str(self.index_path))
+        """持久化 FAISS 索引。
+
+        空索引也写盘（ntotal=0），否则重建空库时临时索引文件缺失、
+        compact 到 0 后旧孤儿向量会在重启时复活。写盘采用临时文件 +
+        os.replace，避免写一半损坏正式索引。
+        """
+        if not FAISS_AVAILABLE or self._index is None:
+            return
+        with self._lock:
+            self.index_path.parent.mkdir(parents=True, exist_ok=True)
+            tmp_path = self.index_path.with_name(self.index_path.name + ".tmp")
+            faiss.write_index(self._index, str(tmp_path))
+            os.replace(tmp_path, self.index_path)
+
+    def reload_index(self) -> None:
+        """从磁盘重新加载 FAISS 索引；文件缺失时重建空索引。"""
+        if not FAISS_AVAILABLE:
+            raise RuntimeError("faiss 未安装，请 pip install faiss-cpu")
+        with self._lock:
+            if self.index_path.exists():
+                try:
+                    idx = faiss.read_index(str(self.index_path))
+                    self.dim = idx.d
+                    self._index = idx
+                    self.index_corrupted = False
+                    return
+                except Exception as exc:
+                    logger.error("FAISS index reload failed for %s: %s", self.index_path, exc)
+                    self._index = faiss.IndexFlatIP(self.dim)
+                    self.index_corrupted = True
+                    return
+            self._index = faiss.IndexFlatIP(self.dim)
+            self.index_corrupted = False
+
+    def replace_index_in_place(self, index: Any, dim: int) -> None:
+        """用已构建好的新索引原子替换内存索引（调用方需已替换磁盘文件）。"""
+        with self._lock:
+            self._index = index
+            self.dim = int(dim)
+            self.index_corrupted = False
+
+    def backup_files(self, suffix: str = ".bak.v071") -> list[tuple[Path, Path, bool]]:
+        """备份 SQLite 与 FAISS 文件。
+
+        Returns:
+            [(original_path, backup_path, existed_before), ...]
+        """
+        pairs: list[tuple[Path, Path, bool]] = []
+        for p in (self.db_path, self.index_path):
+            bak = p.with_name(p.name + suffix)
+            existed = p.exists()
+            if not existed:
+                pairs.append((p, bak, False))
+                continue
+            try:
+                if p == self.db_path:
+                    with self._lock:
+                        src = sqlite3.connect(self.db_path)
+                        dst = sqlite3.connect(bak)
+                        try:
+                            src.backup(dst)
+                        finally:
+                            src.close()
+                            dst.close()
+                else:
+                    with self._lock:
+                        shutil.copy2(p, bak)
+                pairs.append((p, bak, True))
+            except Exception:
+                logger.exception("backup failed: %s -> %s", p, bak)
+                for _, created_bak, _ in pairs:
+                    created_bak.unlink(missing_ok=True)
+                bak.unlink(missing_ok=True)
+                # 备份失败视为致命错误：不能让调用方在无备份的情况下继续替换
+                raise
+        return pairs
 
     @property
     def index_size(self) -> int:
@@ -308,6 +389,74 @@ class MemeDatabase:
             cur = c.execute("DELETE FROM memes WHERE file_path = ?", (file_path,))
             return cur.rowcount > 0
 
+    def copy_runtime_state_from(self, source: "MemeDatabase") -> int:
+        """从旧库复制运行时状态（使用统计/禁用标记/日志），用于重建保留历史。"""
+        with source._conn() as c:
+            meme_rows = c.execute(
+                "SELECT file_path, usage_count, last_used_at, disabled FROM memes"
+            ).fetchall()
+            search_rows = c.execute(
+                "SELECT query_text, tag_filter, topk_ids, selected_id, similarity, "
+                "created_at FROM search_log"
+            ).fetchall()
+            index_rows = c.execute(
+                "SELECT action, file_path, status, message, created_at FROM index_log"
+            ).fetchall()
+
+        copied = 0
+        with self._conn() as c:
+            for r in meme_rows:
+                cur = c.execute(
+                    "UPDATE memes SET usage_count = ?, last_used_at = ?, disabled = ? "
+                    "WHERE file_path = ?",
+                    (r["usage_count"], r["last_used_at"], r["disabled"], r["file_path"]),
+                )
+                copied += cur.rowcount
+            c.executemany(
+                "INSERT INTO search_log "
+                "(query_text, tag_filter, topk_ids, selected_id, similarity, created_at) "
+                "VALUES (?, ?, ?, ?, ?, ?)",
+                [
+                    (
+                        r["query_text"],
+                        r["tag_filter"],
+                        r["topk_ids"],
+                        r["selected_id"],
+                        r["similarity"],
+                        r["created_at"],
+                    )
+                    for r in search_rows
+                ],
+            )
+            c.executemany(
+                "INSERT INTO index_log (action, file_path, status, message, created_at) "
+                "VALUES (?, ?, ?, ?, ?)",
+                [
+                    (
+                        r["action"],
+                        r["file_path"],
+                        r["status"],
+                        r["message"],
+                        r["created_at"],
+                    )
+                    for r in index_rows
+                ],
+            )
+        return copied
+
+    def get_meta(self, key: str, default: str | None = None) -> str | None:
+        with self._conn() as c:
+            row = c.execute("SELECT value FROM meta WHERE key = ?", (key,)).fetchone()
+            return row["value"] if row else default
+
+    def set_meta(self, key: str, value: str) -> None:
+        with self._conn() as c:
+            c.execute(
+                "INSERT INTO meta (key, value) VALUES (?, ?) "
+                "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                (key, value),
+            )
+
     def get_meme(self, meme_id: int) -> dict | None:
         with self._conn() as c:
             row = c.execute("SELECT * FROM memes WHERE id = ?", (meme_id,)).fetchone()
@@ -394,6 +543,12 @@ class MemeDatabase:
             row = c.execute("SELECT COUNT(*) AS n FROM memes WHERE disabled = 0").fetchone()
             return row["n"] if row else 0
 
+    def total_row_count(self) -> int:
+        """包含禁用行的总记录数，用于判断是否有旧向量需要保护。"""
+        with self._conn() as c:
+            row = c.execute("SELECT COUNT(*) AS n FROM memes").fetchone()
+            return row["n"] if row else 0
+
     def mark_used(self, meme_id: int) -> None:
         with self._conn() as c:
             c.execute(
@@ -477,6 +632,11 @@ class MemeDatabase:
             return [dict(r) for r in rows]
 
     # ---------- Tags ----------
+
+    def get_tag(self, name: str) -> dict | None:
+        with self._conn() as c:
+            row = c.execute("SELECT * FROM tags WHERE name = ?", (name,)).fetchone()
+            return dict(row) if row else None
 
     def upsert_tag(self, name: str, description: str = "", category: str = "", color: str = "") -> None:
         with self._conn() as c:
@@ -609,7 +769,9 @@ class MemeDatabase:
             "index_corrupted": self.index_corrupted,
         }
 
-    def health_check(self, root: str | Path | None = None) -> dict:
+    def health_check(
+        self, root: str | Path | None = None, verify_hashes: bool = False
+    ) -> dict:
         """索引健康检查：DB/FAISS/文件系统一致性。"""
         with self._conn() as c:
             rows = c.execute("SELECT id, file_path, file_hash, tag, vector_id, caption_vector_id, disabled FROM memes").fetchall()
@@ -625,11 +787,26 @@ class MemeDatabase:
         orphan_outside_root = []
         bad_vector_ids = []
         bad_caption_vector_ids = []
+        stale_hash_files = []
         root_path = Path(root).resolve() if root else None
         for r in active:
             p = Path(r["file_path"])
             if not p.exists():
                 missing_files.append({"id": r["id"], "file_path": r["file_path"]})
+            elif verify_hashes:
+                try:
+                    current_hash = compute_file_hash(p)
+                except Exception:
+                    current_hash = ""
+                if current_hash != r["file_hash"]:
+                    stale_hash_files.append(
+                        {
+                            "id": r["id"],
+                            "file_path": r["file_path"],
+                            "db_hash": r["file_hash"],
+                            "disk_hash": current_hash,
+                        }
+                    )
             if root_path is not None:
                 try:
                     p.resolve().relative_to(root_path)
@@ -668,6 +845,7 @@ class MemeDatabase:
             or bad_caption_vector_ids
             or index_mismatch
             or self.index_corrupted
+            or (verify_hashes and stale_hash_files)
         )
         return {
             "ok": ok,
@@ -692,4 +870,7 @@ class MemeDatabase:
             "unregistered_tags": unregistered_tags,
             "orphan_outside_root": orphan_outside_root,
             "orphan_outside_root_count": len(orphan_outside_root),
+            "stale_hash_files": stale_hash_files,
+            "stale_hash_count": len(stale_hash_files),
+            "verify_hashes": verify_hashes,
         }

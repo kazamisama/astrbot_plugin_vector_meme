@@ -80,3 +80,25 @@ def test_dual_retriever_uses_caption_path(tmp_path):
     res = retriever.retrieve("smiling cat", tag="happy", topk=2)
     assert res.hits
     assert res.hits[0].meme_id == m1
+
+
+def test_retrieve_rerank_false_is_deterministic(tmp_path):
+    db = MemeDatabase(tmp_path / "m.db", tmp_path / "m.faiss", dim=16)
+    emb = DummyEmbedder(16, seed=3)
+    base = emb.embed_text("happy")
+    arr = np.repeat(base[None, :], 6, axis=0)
+    vids = db.add_vectors(arr)
+    for i, vid in enumerate(vids):
+        db.upsert_meme(str(tmp_path / f"{i}.png"), str(i), "happy", int(vid))
+
+    retriever = MemeRetriever(
+        db, emb, anti_repeat_window=0, candidate_pool_size=6, random_jitter=0.1
+    )
+    choices = []
+    for _ in range(10):
+        result = retriever.retrieve(
+            "happy", tag="happy", topk=6, anti_repeat=False, rerank=False
+        )
+        hit = max(result.hits, key=lambda h: h.raw_similarity)
+        choices.append(hit.meme_id)
+    assert len(set(choices)) == 1

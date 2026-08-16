@@ -51,6 +51,15 @@ LEGACY_TAG_PATTERN = re.compile(r"&&\s*([a-zA-Z0-9_\-一-鿿]+)\s*&&|:\s*([a-zA-
 # vector_meme 不提取、不清理块内的 %%tag%% 占位符，避免该插件静默丢弃 sticker。
 STICKER_BLOCK_RE = re.compile(r"<sticker[^>]*>.*?</sticker>", re.DOTALL | re.IGNORECASE)
 
+# 需要管理员权限的命令：这些命令会修改索引/数据库、读取本地路径或产生模型/API 成本
+ADMIN_ONLY_SUBCOMMANDS = {
+    "预热", "索引", "重建", "修复", "诊断", "健康检查", "健康",
+    "自动分类", "分类", "评测", "重标注", "删除", "刷新提示", "caption",
+}
+
+# 普通成员可使用，但不允许触发冷启动模型加载（避免成本型滥用）
+MEMBER_COLD_LOAD_GATED_SUBCOMMANDS = {"搜索", "解释", "为什么"}
+
 
 def strip_tags_outside_stickers(text: str, allow_legacy: bool = False) -> str:
     """清理 %%tag%%（及可选 legacy 标记），但保留 <sticker>...</sticker> 块原样。"""
@@ -149,7 +158,6 @@ class VectorMemePlugin(Star):
         if backend == "api":
             # api 后端：图片不可直接编码，必须依赖 caption 文本向量
             self.caption_enabled = True
-        self._indexer_lock = asyncio.Lock()
         self._mutation_lock = asyncio.Lock()
 
         self._init_storage()
@@ -169,80 +177,152 @@ class VectorMemePlugin(Star):
             dim=INIT_TEMP_DIM,
         )
 
-    async def _ensure_embedder(self, for_rebuild: bool = False) -> BaseEmbedder:
-        """懒加载嵌入器（首次调用才下载/加载模型）。"""
+    def _make_indexer(self, db: MemeDatabase) -> MemeIndexer:
+        """按当前配置为指定数据库创建索引器。"""
+        return MemeIndexer(
+            db,
+            self._embedder,
+            use_subdir_as_tag=bool(self.config.get("use_subdir_as_tag", True)),
+            default_tag=self.config.get("default_tag", "misc"),
+            tag_schema=self._load_tag_schema(),
+        )
+
+    def _make_retriever(self, db: MemeDatabase) -> MemeRetriever:
+        """按当前配置为指定数据库创建检索器。"""
+        retriever_cls = DualRetriever if self.caption_enabled else MemeRetriever
+        retriever = retriever_cls(
+            db,
+            self._embedder,
+            anti_repeat_window=int(self.config.get("anti_repeat_window", 20)),
+            candidate_pool_size=int(self.config.get("selection_pool_size", 12)),
+            random_jitter=float(self.config.get("selection_random_jitter", 0.015)),
+        )
+        if self.caption_enabled and hasattr(retriever, "caption_weight"):
+            if self._backend_name == "api":
+                # api 后端纯 caption 检索
+                retriever.caption_weight = 1.0
+            else:
+                retriever.caption_weight = float(self.config.get("caption_score_weight", 0.6))
+        return retriever
+
+    def _embedder_fingerprint(self) -> str:
+        """返回当前 embedder 的嵌入空间指纹。"""
+        if self._embedder is None:
+            return ""
+        try:
+            fp = getattr(self._embedder, "fingerprint", "")
+            if fp:
+                return str(fp)
+        except Exception:
+            pass
+        return f"{self._backend_name}:{self._embedder.dim}"
+
+    def _prepare_library_for_embedder(self) -> None:
+        """校验 embedder 指纹/维度，并（在安全时）初始化 indexer/retriever。
+
+        任何已有数据的库都不会被本方法静默清空：指纹或维度不匹配时直接报错，
+        由 /vm 重建 走临时库构建流程。
+        """
+        if self._embedder is None or self._db is None:
+            return
+        db = self._db
+        fingerprint = self._embedder_fingerprint()
+        stored_fingerprint = db.get_meta("embedder_fingerprint")
+        total_rows = db.total_row_count()
+        if not stored_fingerprint and total_rows > 0:
+            logger.warning(
+                "[%s] 旧库未记录 embedder 指纹，假定当前 embedder 与现有向量兼容",
+                PLUGIN_NAME,
+            )
+        if stored_fingerprint and stored_fingerprint != fingerprint and total_rows > 0:
+            try:
+                self._embedder.close()
+            except Exception:
+                pass
+            self._embedder = None
+            self._indexer = None
+            self._retriever = None
+            raise RuntimeError(
+                f"embedder 指纹已变化（{stored_fingerprint} -> {fingerprint}），"
+                f"现有库包含 {total_rows} 条记录。请运行 /vm 重建 重建索引，"
+                f"或恢复原来的 embedder 配置。"
+            )
+
+        embedder_dim = self._embedder.dim
+        if db.dim != embedder_dim:
+            existing_count = db.total_row_count()
+            if existing_count > 0:
+                try:
+                    self._embedder.close()
+                except Exception:
+                    pass
+                self._embedder = None
+                raise RuntimeError(
+                    f"embedder 维度 ({embedder_dim}) 与现有库维度 ({db.dim}) 不一致，"
+                    f"且库里已有 {existing_count} 条数据。为避免静默丢失向量索引，"
+                    f"请运行 /vm 重建 重建索引，或回退到原来的模型。"
+                )
+            # 空库场景：丢弃旧维度残留索引，按新维度建库
+            logger.info(
+                "embedder 维度 %d 与库维度 %d 不一致，空库场景按新维度建库",
+                embedder_dim, db.dim,
+            )
+            if db.index_path.exists():
+                db.index_path.unlink()
+            db = MemeDatabase(
+                db_path=self.data_dir / "memes.db",
+                index_path=self.data_dir / "memes.faiss",
+                dim=embedder_dim,
+            )
+            self._db = db
+
+        db.set_meta("embedder_fingerprint", fingerprint)
+        self._indexer = self._make_indexer(db)
+        self._retriever = self._make_retriever(db)
+
+    async def _ensure_embedder(self, prepare_library: bool = True) -> BaseEmbedder:
+        """懒加载嵌入器。
+
+        prepare_library=False 仅加载/复用模型，不触碰现有库与检索组件，
+        供重建流程在临时库构建成功前使用。
+        """
         if self._embedder is not None:
+            if prepare_library and (
+                self._indexer is None or self._retriever is None or self._db is None
+            ):
+                async with self._embedder_lock:
+                    if self._embedder is not None:
+                        self._prepare_library_for_embedder()
             return self._embedder
+
         async with self._embedder_lock:
-            if self._embedder is not None:
-                return self._embedder
-            loop = asyncio.get_running_loop()
+            if self._embedder is None:
+                loop = asyncio.get_running_loop()
 
-            embedder_kwargs = self._embedder_kwargs()
-            env_overrides: dict = {}
-            if embedder_kwargs.get("hf_endpoint"):
-                env_overrides["HF_ENDPOINT"] = embedder_kwargs["hf_endpoint"]
-            if embedder_kwargs.get("cache_dir_env"):
-                cd = embedder_kwargs["cache_dir_env"]
-                env_overrides.setdefault("HF_HOME", cd)
-                env_overrides.setdefault("HUGGINGFACE_HUB_CACHE", cd)
-                env_overrides.setdefault("TORCH_HOME", str(Path(cd) / "torch"))
+                embedder_kwargs = self._embedder_kwargs()
+                env_overrides: dict = {}
+                if embedder_kwargs.get("hf_endpoint"):
+                    env_overrides["HF_ENDPOINT"] = embedder_kwargs["hf_endpoint"]
+                if embedder_kwargs.get("cache_dir_env"):
+                    cd = embedder_kwargs["cache_dir_env"]
+                    env_overrides.setdefault("HF_HOME", cd)
+                    env_overrides.setdefault("HUGGINGFACE_HUB_CACHE", cd)
+                    env_overrides.setdefault("TORCH_HOME", str(Path(cd) / "torch"))
 
-            def _create():
-                with self._env_scope(env_overrides):
-                    return EmbedderFactory.create(
-                        self._backend_name,
-                        **{k: v for k, v in embedder_kwargs.items() if k not in ("hf_endpoint", "cache_dir_env")},
-                    )
+                def _create():
+                    with self._env_scope(env_overrides):
+                        return EmbedderFactory.create(
+                            self._backend_name,
+                            **{
+                                k: v
+                                for k, v in embedder_kwargs.items()
+                                if k not in ("hf_endpoint", "cache_dir_env")
+                            },
+                        )
 
-            self._embedder = await loop.run_in_executor(None, _create)
-            # 维度不匹配：库里已有数据则拒绝静默重建，避免丢索引；重建流程可显式跳过
-            if self._db is not None and self._db.dim != self._embedder.dim:
-                embedder_dim = self._embedder.dim
-                existing_count = self._db.total_count()
-                if existing_count > 0 and not for_rebuild:
-                    try:
-                        self._embedder.close()
-                    except Exception:
-                        pass
-                    self._embedder = None
-                    raise RuntimeError(
-                        f"embedder 维度 ({embedder_dim}) 与现有库维度 ({self._db.dim}) 不一致，"
-                        f"且库里已有 {existing_count} 条数据。为避免静默丢失向量索引，"
-                        f"请运行 /表情向量 重建 重建索引，或回退到原来的模型。"
-                    )
-                # 重建或空库场景：丢弃旧维度残留索引，按新维度建库
-                logger.info(
-                    "embedder 维度 %d 与库维度 %d 不一致，重建/空库场景按新维度建库",
-                    embedder_dim, self._db.dim,
-                )
-                if self._db.index_path.exists():
-                    self._db.index_path.unlink()
-                self._db = MemeDatabase(
-                    db_path=self.data_dir / "memes.db",
-                    index_path=self.data_dir / "memes.faiss",
-                    dim=embedder_dim,
-                )
-            self._indexer = MemeIndexer(
-                self._db, self._embedder,
-                use_subdir_as_tag=bool(self.config.get("use_subdir_as_tag", True)),
-                default_tag=self.config.get("default_tag", "misc"),
-                tag_schema=self._load_tag_schema(),
-            )
-            retriever_cls = DualRetriever if self.caption_enabled else MemeRetriever
-            self._retriever = retriever_cls(
-                self._db,
-                self._embedder,
-                anti_repeat_window=int(self.config.get("anti_repeat_window", 20)),
-                candidate_pool_size=int(self.config.get("selection_pool_size", 12)),
-                random_jitter=float(self.config.get("selection_random_jitter", 0.015)),
-            )
-            if self.caption_enabled and hasattr(self._retriever, 'caption_weight'):
-                if self._backend_name == "api":
-                    # api 后端纯 caption 检索
-                    self._retriever.caption_weight = 1.0
-                else:
-                    self._retriever.caption_weight = float(self.config.get('caption_score_weight', 0.6))
+                self._embedder = await loop.run_in_executor(None, _create)
+            if prepare_library:
+                self._prepare_library_for_embedder()
             return self._embedder
 
     @staticmethod
@@ -329,6 +409,18 @@ class VectorMemePlugin(Star):
                 out[abs_path] = caption_text
         return out
 
+    def _collect_db_captions(self, db: MemeDatabase) -> dict[str, str]:
+        """导出旧库中已有 caption，供重建时在新库中复用。"""
+        out: dict[str, str] = {}
+        try:
+            for row in db.list_memes(limit=10_000_000):
+                cap = (row.get("caption") or "").strip()
+                if cap:
+                    out[str(row["file_path"])] = cap
+        except Exception:
+            logger.exception(f"[{PLUGIN_NAME}] 读取旧库 caption 失败")
+        return out
+
     def _export_captions(self) -> int:
         """把 DB 中已有 caption 导出到 memes/captions.json（key=相对 meme_dir 路径）。"""
         if self._db is None:
@@ -370,11 +462,47 @@ class VectorMemePlugin(Star):
             logger.exception(f'[{PLUGIN_NAME}] caption enrichment failed')
             return {}
 
-    async def _ensure_ready(self, for_rebuild: bool = False) -> tuple[MemeRetriever, MemeIndexer, MemeDatabase] | None:
-        await self._ensure_embedder(for_rebuild=for_rebuild)
+    async def _ensure_ready(self) -> tuple[MemeRetriever, MemeIndexer, MemeDatabase] | None:
+        await self._ensure_embedder()
         if self._retriever is None or self._indexer is None or self._db is None:
             return None
         return self._retriever, self._indexer, self._db
+
+    async def _ensure_ready_with_heartbeat(
+        self, event: AstrMessageEvent, action: str
+    ) -> tuple[MemeRetriever, MemeIndexer, MemeDatabase] | None:
+        """冷启动加载 embedder 时向用户发送心跳，避免长时间无反馈。"""
+        if self._embedder is not None and self._retriever is not None:
+            return await self._ensure_ready()
+        from astrbot.core.message.message_event_result import MessageEventResult
+
+        async def _send(text):
+            try:
+                await event.send(MessageEventResult().message(text))
+            except Exception as e:
+                logger.warning(f"[{PLUGIN_NAME}] 后台发消息失败: {e}")
+
+        done = asyncio.Event()
+
+        async def _heartbeat():
+            t = 0
+            await _send(f"⏳ 正在加载 embedder（{action}）...")
+            while not done.is_set():
+                await asyncio.sleep(5)
+                t += 5
+                if done.is_set():
+                    break
+                await _send(f"⏳ 仍在加载 embedder... ({t}s)")
+
+        task = asyncio.create_task(_heartbeat())
+        try:
+            return await self._ensure_ready()
+        finally:
+            done.set()
+            try:
+                await asyncio.wait_for(task, timeout=3.0)
+            except asyncio.TimeoutError:
+                task.cancel()
 
     # ---------- 路径与自动索引 ----------
 
@@ -401,11 +529,23 @@ class VectorMemePlugin(Star):
         self._inject_into_personas()
         logger.info(f"[{PLUGIN_NAME}] 自动索引完成")
 
+    @staticmethod
+    def _event_is_admin(event: AstrMessageEvent) -> bool:
+        """兼容不同 AstrBot 版本的管理员判断。"""
+        fn = getattr(event, "is_admin", None)
+        if callable(fn):
+            try:
+                return bool(fn())
+            except Exception:
+                return False
+        return bool(getattr(event, "role", None) == "admin")
+
     # ---------- 命令 ----------
 
     async def _dispatch_command(self, event: AstrMessageEvent, args: list[str]):
         """统一命令分发。支持 @filter.command 和普通文本监听共用。"""
         if not args:
+            sub = "状态"
             handler = self._cmd_status
             rest = []
         else:
@@ -438,6 +578,26 @@ class VectorMemePlugin(Star):
                 "帮助": self._cmd_help,
                 'caption': self._cmd_caption,
             }.get(sub, self._cmd_help)
+
+        is_admin = self._event_is_admin(event)
+        if sub in ADMIN_ONLY_SUBCOMMANDS and not is_admin:
+            yield event.plain_result(
+                f"[{PLUGIN_NAME}] 权限不足：`{sub}` 仅管理员可用"
+            )
+            event.stop_event()
+            return
+        if (
+            sub in MEMBER_COLD_LOAD_GATED_SUBCOMMANDS
+            and not is_admin
+            and self._embedder is None
+        ):
+            yield event.plain_result(
+                f"[{PLUGIN_NAME}] embedder 尚未预热；请让管理员先执行 /vm 预热，"
+                f"预热后普通成员即可使用 `{sub}`。"
+            )
+            event.stop_event()
+            return
+
         try:
             async for result in handler(event, rest):
                 yield result
@@ -539,15 +699,32 @@ class VectorMemePlugin(Star):
             f"- 向量维度: {s['dim']}\n"
             f"- 后端: {self._backend_name}\n"
             f"- embedder: {'已加载' if self._embedder is not None else '未加载'}\n"
+            f"- FAISS 索引: {'损坏，建议 /vm 重建' if s['index_corrupted'] else '正常'}\n"
             f"- meme_dir: {self.meme_dir}\n"
             f"- data_dir: {self.data_dir}\n"
         )
         yield event.plain_result(msg)
 
+    def _path_within_meme_dir(self, path: Path) -> bool:
+        """只允许索引配置 meme_dir 自身或其子目录，避免任意路径扫描。"""
+        try:
+            path.resolve().relative_to(self.meme_dir.resolve())
+            return True
+        except (ValueError, OSError):
+            return False
+
     async def _cmd_index(self, event: AstrMessageEvent, rest: list[str]):
         path = Path(rest[0]) if rest else self.meme_dir
         if not path or not path.exists():
             yield event.plain_result(f"目录不存在: {path}")
+            return
+        if not path.is_dir():
+            yield event.plain_result(f"不是目录: {path}")
+            return
+        if not self._path_within_meme_dir(path):
+            yield event.plain_result(
+                f"无权索引该目录：{path}\n只允许索引 meme_dir（{self.meme_dir}）或其子目录"
+            )
             return
         yield event.plain_result(
             f"开始索引 {path} ...\n后端: {self._backend_name}\n"
@@ -632,7 +809,11 @@ class VectorMemePlugin(Star):
         try:
             async with self._mutation_lock:
                 progress = await asyncio.to_thread(
-                    lambda: indexer.index_directory(path, progress=IndexProgress(_on_progress)),
+                    lambda: indexer.index_directory(
+                        path,
+                        progress=IndexProgress(_on_progress),
+                        tag_root=self.meme_dir,
+                    ),
                 )
         finally:
             reporter_done.set()
@@ -658,6 +839,29 @@ class VectorMemePlugin(Star):
             f"- 总计: {progress.total}"
         )
 
+    @staticmethod
+    def _restore_backup_files(backup_paths: list[tuple[Path, Path, bool]]) -> list[str]:
+        """把备份还原到原始路径；原始不存在的文件则删除新文件。"""
+        errors: list[str] = []
+        for original, backup, existed in backup_paths:
+            try:
+                if existed:
+                    shutil.copy2(backup, original)
+                else:
+                    original.unlink(missing_ok=True)
+            except Exception as e:
+                errors.append(f"{original}: {e}")
+                logger.exception(f"[{PLUGIN_NAME}] 还原备份失败 {backup} -> {original}")
+        return errors
+
+    @staticmethod
+    def _delete_backup_files(backup_paths: list[tuple[Path, Path, bool]]) -> None:
+        for _, backup, _ in backup_paths:
+            try:
+                backup.unlink(missing_ok=True)
+            except Exception as e:
+                logger.warning(f"[{PLUGIN_NAME}] remove backup failed {backup}: {e}")
+
     async def _cmd_rebuild(self, event: AstrMessageEvent, rest: list[str]):
         path = self.meme_dir
         if not path or not path.exists():
@@ -668,181 +872,212 @@ class VectorMemePlugin(Star):
             f"如果是 open_clip，首次加载/下载模型可能需要较久。"
         )
 
-        # 先备份旧库：embedder 加载/重建失败时保留恢复入口
-        backup_paths: list[tuple[Path, Path]] = []
-        if self._db is not None:
-            for p in (self._db.db_path, self._db.index_path):
-                if not p.exists():
-                    continue
-                bak = p.with_name(p.name + ".bak.v071")
-                try:
-                    shutil.copy2(p, bak)
-                    backup_paths.append((p, bak))
-                except Exception as e:
-                    logger.warning(f"[{PLUGIN_NAME}] 重建备份失败 {p} -> {bak}: {e}")
+        success = False
+        backup_paths: list[tuple[Path, Path, bool]] = []
+        backup_hint = "无"
+        progress: IndexProgress | None = None
+        old_indexer = self._indexer
+        old_retriever = self._retriever
+        embedder_was_loaded = self._embedder is not None
+        swap_attempted = False
+        swapped = False
 
-        embedder_done = asyncio.Event()
-        from astrbot.core.message.message_event_result import MessageEventResult
-
-        async def _send(text):
-            try:
-                await event.send(MessageEventResult().message(text))
-            except Exception as e:
-                logger.warning(f"[{PLUGIN_NAME}] 后台发消息失败: {e}")
-
-        async def _embedder_heartbeat():
-            t = 0
-            await _send("⏳ 正在加载 embedder...")
-            while not embedder_done.is_set():
-                await asyncio.sleep(5)
-                t += 5
-                if embedder_done.is_set():
-                    break
-                await _send(f"⏳ 仍在加载 embedder... ({t}s)")
-        heartbeat_task = asyncio.create_task(_embedder_heartbeat())
-        try:
-            # 重建语义：先加载 embedder（for_rebuild 跳过维度保护），失败时旧库原样保留
-            ready = await self._ensure_ready(for_rebuild=True)
-        except Exception as e:
-            logger.exception("重建：embedder 加载失败")
-            backup_hint = ", ".join(str(bak) for _, bak in backup_paths) or "无"
-            yield event.plain_result(f"embedder 加载失败，已保留原库。备份: {backup_hint}")
-            return
-        finally:
-            embedder_done.set()
-            try:
-                await asyncio.wait_for(heartbeat_task, timeout=3.0)
-            except asyncio.TimeoutError:
-                heartbeat_task.cancel()
-        if not ready:
-            yield event.plain_result("embedder 未就绪")
-            return
-        _, indexer, _ = ready
-
-        progress_q: asyncio.Queue = asyncio.Queue(maxsize=64)
-
-        loop = asyncio.get_running_loop()
-
-        def _queue_progress(done, total, fp):
-            try:
-                progress_q.put_nowait((done, total, str(fp)))
-            except asyncio.QueueFull:
-                pass
-
-        def _on_progress(done, total, fp):
-            logger.info(f"[rebuild] {done}/{total} {fp}")
-            loop.call_soon_threadsafe(_queue_progress, done, total, str(fp))
-
-        from astrbot.core.message.message_event_result import MessageEventResult
-
-        async def _send_progress(text):
-            try:
-                await event.send(MessageEventResult().message(text))
-            except Exception as e:
-                logger.warning(f"[{PLUGIN_NAME}] progress send failed: {e}")
-
-        async def _progress_reporter():
-            last_done = -10
-            while True:
-                try:
-                    done, total, fp = await asyncio.wait_for(progress_q.get(), timeout=2.0)
-                except asyncio.TimeoutError:
-                    if reporter_done.is_set():
-                        break
-                    continue
-                if done - last_done < 10 and done != total:
-                    continue
-                last_done = done
-                await _send_progress(
-                    f"⏳ 重建进度: {done}/{total}\n最近: {Path(fp).name}"
-                )
-                if done >= total:
-                    break
-
-        reporter_done = asyncio.Event()
-        reporter_task = asyncio.create_task(_progress_reporter())
-        tmp_dir = Path(tempfile.mkdtemp(prefix="vector_meme_rebuild_", dir=self.data_dir))
-        tmp_db_path = tmp_dir / "memes.db"
-        tmp_index_path = tmp_dir / "memes.faiss"
         try:
             async with self._mutation_lock:
-                tmp_db = MemeDatabase(tmp_db_path, tmp_index_path, dim=self._embedder.dim)
-                tmp_indexer = MemeIndexer(
-                    tmp_db,
-                    self._embedder,
-                    use_subdir_as_tag=bool(self.config.get("use_subdir_as_tag", True)),
-                    default_tag=self.config.get("default_tag", "misc"),
-                    tag_schema=self._load_tag_schema(),
-                )
-                progress = await asyncio.to_thread(
-                    lambda: tmp_indexer.index_directory(path, progress=IndexProgress(_on_progress))
-                )
-                if self.caption_enabled:
-                    captioner = self._ensure_captioner()
-                    external = self._load_external_captions()
-                    if captioner.available() or external:
-                        await enrich_meme_captions(
-                            tmp_db,
-                            self._embedder,
-                            captioner,
-                            limit=int(self.config.get("caption_batch_limit", 500)),
-                            external_captions=external,
-                        )
-                    else:
-                        logger.warning(f"[{PLUGIN_NAME}] vision caption enabled but provider unavailable during rebuild")
-                tmp_db.save_index()
-
                 old_db = self._db
+                if old_db is None:
+                    yield event.plain_result("数据库未初始化")
+                    return
+                old_dim = old_db.dim
+
+                # 1. 先备份，备份失败直接中止，不碰原库。
+                backup_paths: list[tuple[Path, Path, bool]] = []
                 try:
-                    os.replace(tmp_db_path, old_db.db_path)
-                    os.replace(tmp_index_path, old_db.index_path)
+                    backup_paths = old_db.backup_files()
                 except Exception:
-                    for original, backup in backup_paths:
-                        shutil.copy2(backup, original)
-                    raise
+                    logger.exception(f"[{PLUGIN_NAME}] 重建备份失败，中止重建")
+                    yield event.plain_result("重建备份失败，原库未受影响。")
+                    return
+                backup_hint = ", ".join(str(bak) for _, bak, _ in backup_paths if bak.exists()) or "无"
 
-                self._db = MemeDatabase(old_db.db_path, old_db.index_path, dim=self._embedder.dim)
-                self._indexer = MemeIndexer(
-                    self._db,
-                    self._embedder,
-                    use_subdir_as_tag=bool(self.config.get("use_subdir_as_tag", True)),
-                    default_tag=self.config.get("default_tag", "misc"),
-                    tag_schema=self._load_tag_schema(),
-                )
-                retriever_cls = DualRetriever if self.caption_enabled else MemeRetriever
-                self._retriever = retriever_cls(
-                    self._db,
-                    self._embedder,
-                    anti_repeat_window=int(self.config.get("anti_repeat_window", 20)),
-                    candidate_pool_size=int(self.config.get("selection_pool_size", 12)),
-                    random_jitter=float(self.config.get("selection_random_jitter", 0.015)),
-                )
-                if self.caption_enabled and hasattr(self._retriever, "caption_weight"):
-                    if self._backend_name == "api":
-                        self._retriever.caption_weight = 1.0
-                    else:
-                        self._retriever.caption_weight = float(self.config.get("caption_score_weight", 0.6))
+                # 2. 只加载 embedder，不修改/不删除现有库。
+                embedder_done = asyncio.Event()
+                from astrbot.core.message.message_event_result import MessageEventResult
 
-                self._sync_tag_registry(self._db)
-                self._inject_into_personas()
+                async def _send(text):
+                    try:
+                        await event.send(MessageEventResult().message(text))
+                    except Exception as e:
+                        logger.warning(f"[{PLUGIN_NAME}] 后台发消息失败: {e}")
+
+                async def _embedder_heartbeat():
+                    t = 0
+                    await _send("⏳ 正在加载 embedder...")
+                    while not embedder_done.is_set():
+                        await asyncio.sleep(5)
+                        t += 5
+                        if embedder_done.is_set():
+                            break
+                        await _send(f"⏳ 仍在加载 embedder... ({t}s)")
+
+                heartbeat_task = asyncio.create_task(_embedder_heartbeat())
+                try:
+                    await self._ensure_embedder(prepare_library=False)
+                except Exception:
+                    logger.exception(f"[{PLUGIN_NAME}] 重建：embedder 加载失败")
+                    yield event.plain_result(
+                        f"embedder 加载失败，已保留原库。备份: {backup_hint}"
+                    )
+                    return
+                finally:
+                    embedder_done.set()
+                    try:
+                        await asyncio.wait_for(heartbeat_task, timeout=3.0)
+                    except asyncio.TimeoutError:
+                        heartbeat_task.cancel()
+
+                # 3. 在临时目录构建完整新库，成功后原地替换内存索引。
+                progress_q: asyncio.Queue = asyncio.Queue(maxsize=64)
+                loop = asyncio.get_running_loop()
+
+                def _queue_progress(done, total, fp):
+                    try:
+                        progress_q.put_nowait((done, total, str(fp)))
+                    except asyncio.QueueFull:
+                        pass
+
+                def _on_progress(done, total, fp):
+                    logger.info(f"[rebuild] {done}/{total} {fp}")
+                    loop.call_soon_threadsafe(_queue_progress, done, total, str(fp))
+
+                async def _send_progress(text):
+                    try:
+                        await event.send(MessageEventResult().message(text))
+                    except Exception as e:
+                        logger.warning(f"[{PLUGIN_NAME}] progress send failed: {e}")
+
+                async def _progress_reporter():
+                    last_done = -10
+                    while True:
+                        try:
+                            done, total, fp = await asyncio.wait_for(
+                                progress_q.get(), timeout=2.0
+                            )
+                        except asyncio.TimeoutError:
+                            if reporter_done.is_set():
+                                break
+                            continue
+                        if done - last_done < 10 and done != total:
+                            continue
+                        last_done = done
+                        await _send_progress(
+                            f"⏳ 重建进度: {done}/{total}\n最近: {Path(fp).name}"
+                        )
+                        if done >= total:
+                            break
+
+                reporter_done = asyncio.Event()
+                reporter_task = asyncio.create_task(_progress_reporter())
+                tmp_dir = Path(
+                    tempfile.mkdtemp(prefix="vector_meme_rebuild_", dir=self.data_dir)
+                )
+                tmp_db_path = tmp_dir / "memes.db"
+                tmp_index_path = tmp_dir / "memes.faiss"
+                try:
+                    tmp_db = MemeDatabase(
+                        tmp_db_path, tmp_index_path, dim=self._embedder.dim
+                    )
+                    tmp_indexer = self._make_indexer(tmp_db)
+                    progress = await asyncio.to_thread(
+                        lambda: tmp_indexer.index_directory(
+                            path, progress=IndexProgress(_on_progress)
+                        )
+                    )
+                    # 保留 usage_count / last_used_at / disabled 以及检索/索引日志
+                    tmp_db.copy_runtime_state_from(old_db)
+
+                    if self.caption_enabled:
+                        captioner = self._ensure_captioner()
+                        external = self._load_external_captions()
+                        legacy_captions = self._collect_db_captions(old_db)
+                        merged_captions = {**legacy_captions, **external}
+                        if captioner.available() or merged_captions:
+                            await enrich_meme_captions(
+                                tmp_db,
+                                self._embedder,
+                                captioner,
+                                limit=int(self.config.get("caption_batch_limit", 500)),
+                                external_captions=merged_captions,
+                            )
+                        else:
+                            logger.warning(
+                                f"[{PLUGIN_NAME}] vision caption enabled but provider unavailable during rebuild"
+                            )
+
+                    self._sync_tag_registry(tmp_db)
+                    tmp_db.set_meta("embedder_fingerprint", self._embedder_fingerprint())
+                    # 空库也会写出空 FAISS 文件，保证下面 os.replace 成功
+                    tmp_db.save_index()
+
+                    with old_db._lock:
+                        swap_attempted = True
+                        try:
+                            os.replace(tmp_db_path, old_db.db_path)
+                            os.replace(tmp_index_path, old_db.index_path)
+                        except Exception:
+                            restore_errors = self._restore_backup_files(backup_paths)
+                            if restore_errors:
+                                logger.error(
+                                    f"[{PLUGIN_NAME}] 还原备份失败: {restore_errors}"
+                                )
+                            raise
+                        old_db.replace_index_in_place(tmp_db._index, self._embedder.dim)
+                        swapped = True
+
+                    self._indexer = self._make_indexer(old_db)
+                    self._retriever = self._make_retriever(old_db)
+                    self._inject_into_personas()
+                    success = True
+                finally:
+                    reporter_done.set()
+                    try:
+                        await asyncio.wait_for(reporter_task, timeout=3.0)
+                    except asyncio.TimeoutError:
+                        reporter_task.cancel()
+                    shutil.rmtree(tmp_dir, ignore_errors=True)
         except Exception:
-            logger.exception("rebuild failed; old library preserved")
-            yield event.plain_result("\u91cd\u5efa\u5931\u8d25\uff0c\u539f\u5e93\u672a\u53d7\u5f71\u54cd\u3002")
+            logger.exception(f"[{PLUGIN_NAME}] rebuild failed; rolling back")
+            if "old_db" in locals() and old_db is not None:
+                if swap_attempted or swapped:
+                    try:
+                        with old_db._lock:
+                            self._restore_backup_files(backup_paths)
+                            old_db.dim = old_dim
+                            old_db.reload_index()
+                    except Exception:
+                        logger.exception(f"[{PLUGIN_NAME}] 重建失败后的回滚未完全成功")
+                self._db = old_db
+            if not embedder_was_loaded and self._embedder is not None:
+                try:
+                    self._embedder.close()
+                except Exception:
+                    pass
+                self._embedder = None
+            self._indexer = old_indexer
+            self._retriever = old_retriever
+            yield event.plain_result(
+                "重建失败，已回滚原库。备份保留: " + backup_hint
+            )
             return
         finally:
-            reporter_done.set()
-            try:
-                await asyncio.wait_for(reporter_task, timeout=3.0)
-            except asyncio.TimeoutError:
-                reporter_task.cancel()
-            shutil.rmtree(tmp_dir, ignore_errors=True)
-            for _, bak in backup_paths:
-                try:
-                    bak.unlink(missing_ok=True)
-                except Exception as e:
-                    logger.warning(f"[{PLUGIN_NAME}] remove backup failed {bak}: {e}")
+            if success:
+                self._delete_backup_files(backup_paths)
+
+        if progress is None:
+            yield event.plain_result("重建未产生进度数据")
+            return
         yield event.plain_result(
-            f"\u91cd\u5efa\u5b8c\u6210\uff0c\u5171\u5904\u7406 {progress.total} \u5f20\uff08\u65b0\u589e {progress.added}\uff09"
+            f"重建完成，共处理 {progress.total} 张（新增 {progress.added}）"
         )
 
     async def _cmd_list(self, event: AstrMessageEvent, rest: list[str]):
@@ -853,7 +1088,8 @@ class VectorMemePlugin(Star):
         if rest:
             tag = rest[0]
             rows = db.list_memes(tag=tag, limit=50)
-            lines = [f"[{tag}] 共 {len(rows)} 条（最多显示 50）"]
+            total = db.count_by_tag().get(tag, 0)
+            lines = [f"[{tag}] 共 {total} 条（最多显示 {len(rows)}）"]
             for r in rows:
                 lines.append(f"  #{r['id']} {r['file_name']} (使用 {r['usage_count']} 次)")
             yield event.plain_result("\n".join(lines))
@@ -896,7 +1132,7 @@ class VectorMemePlugin(Star):
                 text_parts.append(rest[i])
                 i += 1
         text = " ".join(text_parts)
-        ready = await self._ensure_ready()
+        ready = await self._ensure_ready_with_heartbeat(event, "搜索")
         if not ready:
             yield event.plain_result("embedder 未就绪")
             return
@@ -935,7 +1171,7 @@ class VectorMemePlugin(Star):
                 text_parts.append(rest[i])
                 i += 1
         text = " ".join(text_parts)
-        ready = await self._ensure_ready()
+        ready = await self._ensure_ready_with_heartbeat(event, "解释")
         if not ready:
             yield event.plain_result("embedder 未就绪")
             return
@@ -995,7 +1231,7 @@ class VectorMemePlugin(Star):
         now = _time.time()
         lines = [f"最近使用（{len(rows)} 条）："]
         for r in rows:
-            elapsed = now - float(r.get("last_used_at") or now)
+            elapsed = max(now - float(r.get("last_used_at") or now), 0)
             lines.append(f"  #{r['id']} [{r['tag']}] {r['file_name']} - {elapsed:.0f}s 前，使用 {r['usage_count']} 次")
         yield event.plain_result("\n".join(lines))
 
@@ -1005,7 +1241,8 @@ class VectorMemePlugin(Star):
         if db is None:
             yield event.plain_result("数据库未初始化")
             return
-        h = db.health_check(root=self.meme_dir)
+        verify_hashes = any(x in (rest or []) for x in ("--deep", "--hash", "deep", "hash"))
+        h = db.health_check(root=self.meme_dir, verify_hashes=verify_hashes)
         lines = [
             f"[{PLUGIN_NAME}] 健康检查: {'OK' if h['ok'] else 'WARN'}",
             f"- DB有效表情: {h['total']}（禁用 {h['disabled']}）",
@@ -1017,7 +1254,9 @@ class VectorMemePlugin(Star):
             f"- vector_id异常: {h['bad_vector_ids_count']}",
             f"- caption_vector_id异常: {h['bad_caption_vector_ids_count']}",
             f"- 重复hash组: {h['duplicate_hash_count']}",
+            f"- 内容hash不一致: {h['stale_hash_count']}（{'已校验' if h['verify_hashes'] else '未校验，加 --deep 启用'}）",
             f"- root外孤儿记录: {h['orphan_outside_root_count']}",
+            f"- FAISS孤儿向量: {h['orphan_vector_count']} / 有效引用 {h['live_vector_count']}\n"
         ]
         if h["unregistered_tags"]:
             lines.append("- 未注册tag: " + ", ".join(h["unregistered_tags"][:20]))
@@ -1051,6 +1290,10 @@ class VectorMemePlugin(Star):
             meta = tag_meta(name, schema_tags)
             db.upsert_tag(name, description=meta["description"], category=meta["category"], color=meta["color"])
         active = set(db.count_by_tag().keys())
+        # schema 外但仍有 meme 引用的 tag 也要注册；已有描述时不覆盖
+        for name in active - set(schema_tags):
+            if db.get_tag(name) is None:
+                db.upsert_tag(name)
         with db._conn() as c:  # noqa: SLF001 - 受控内部访问
             rows = c.execute("SELECT name FROM tags").fetchall()
             stale = [r["name"] for r in rows if r["name"] not in schema_tags and r["name"] not in active]
@@ -1060,11 +1303,23 @@ class VectorMemePlugin(Star):
 
     async def _cmd_repair(self, event: AstrMessageEvent, rest: list[str]):
         """轻量修复：清理缺失文件记录、注册缺失 tag、刷新 prompt。"""
-        ready = await self._ensure_ready()
+        if self._db is not None and self._db.index_corrupted:
+            yield event.plain_result(
+                "FAISS 索引已损坏，轻量修复无法重建向量；请运行 /vm 重建 恢复。\n"
+                "如需保留元数据，可先备份 memes.db 与 memes.faiss。"
+            )
+            return
+        ready = await self._ensure_ready_with_heartbeat(event, "修复")
         if not ready:
             yield event.plain_result("embedder 未就绪")
             return
         _, indexer, db = ready
+        if db.index_corrupted:
+            yield event.plain_result(
+                "FAISS 索引已损坏，轻量修复无法重建向量；请运行 /vm 重建 恢复。\n"
+                "如需保留元数据，可先备份 memes.db 与 memes.faiss。"
+            )
+            return
         async with self._mutation_lock:
             removed = await asyncio.to_thread(
                 lambda: indexer.remove_missing(self.meme_dir)
@@ -1106,7 +1361,7 @@ class VectorMemePlugin(Star):
         apply = any(x.lower() in {"apply", "确认", "执行"} for x in rest[1:])
         threshold = float(self.config.get("auto_classify_threshold", 0.18))
         margin = float(self.config.get("auto_classify_margin", 0.03))
-        ready = await self._ensure_ready()
+        ready = await self._ensure_ready_with_heartbeat(event, "自动分类")
         if not ready:
             yield event.plain_result("embedder 未就绪")
             return
@@ -1197,7 +1452,7 @@ class VectorMemePlugin(Star):
         if not isinstance(items, list):
             yield event.plain_result("评测集格式错误：需要 list 或 {items: list}")
             return
-        ready = await self._ensure_ready()
+        ready = await self._ensure_ready_with_heartbeat(event, "评测")
         if not ready:
             yield event.plain_result("embedder 未就绪")
             return
@@ -1303,29 +1558,38 @@ class VectorMemePlugin(Star):
             yield event.plain_result('vision caption disabled (enable_vision_caption=false)')
             return
         if rest and rest[0] in ("导出", "export"):
-            count = self._export_captions()
+            async with self._mutation_lock:
+                count = self._export_captions()
             yield event.plain_result(f'已导出 {count} 条 caption 到 memes/captions.json')
             return
-        ready = await self._ensure_ready()
+        ready = await self._ensure_ready_with_heartbeat(event, "caption")
         if not ready:
             yield event.plain_result('embedder not ready')
             return
         captioner = self._ensure_captioner()
-        if not captioner.available():
-            yield event.plain_result('vision provider unavailable (vision_provider_id empty or invalid)')
+        external = self._load_external_captions()
+        if not captioner.available() and not external:
+            yield event.plain_result(
+                'vision provider unavailable (vision_provider_id empty or invalid)'
+            )
             return
         limit = 200
         if rest:
             try:
                 limit = int(rest[0])
-            except Exception:
-                pass
+                if limit <= 0:
+                    yield event.plain_result('limit 必须是正整数')
+                    return
+            except ValueError:
+                yield event.plain_result('limit 必须是正整数')
+                return
         async with self._mutation_lock:
             result = await enrich_meme_captions(
                 self._db,
                 self._embedder,
                 captioner,
                 limit=limit,
+                external_captions=external,
             )
             self._db.save_index()
         yield event.plain_result(
@@ -1351,6 +1615,7 @@ class VectorMemePlugin(Star):
             "  表情向量 标签规范\n"
             "  表情向量 重标注 <id> <新tag>\n"
             "  表情向量 删除 <id>\n"
+            "  表情向量 caption [limit] / caption 导出\n"
             "  表情向量 刷新提示\n"
             "  表情向量 帮助"
         )
@@ -1391,8 +1656,9 @@ class VectorMemePlugin(Star):
                 legacy = LEGACY_TAG_PATTERN.findall(outside_text)
                 tags.extend([a or b for a, b in legacy])
 
-            # 去空、去重、限量；过滤掉数字引用/纯标点等非法 tag
+            # 去空、去重、限量；先语法过滤，再按 DB 中真实 tag 做白名单过滤
             max_n = int(self.config.get("max_per_message", 2))
+            known_tags = self._known_tags() if tags else set()
             seen = set()
             filtered_tags = []
             for t in tags:
@@ -1402,7 +1668,12 @@ class VectorMemePlugin(Star):
                 if not self._is_valid_emotion_tag(t):
                     logger.debug(f"[{PLUGIN_NAME}] 过滤非法 tag: {t!r}")
                     continue
+                if t not in known_tags:
+                    logger.info(f"[{PLUGIN_NAME}] 过滤未知 tag（不触发 fallback）: {t!r}")
+                    continue
                 seen.add(t)
+                if max_n <= 0:
+                    continue
                 filtered_tags.append(t)
                 if len(filtered_tags) >= max_n:
                     break
@@ -1549,6 +1820,7 @@ class VectorMemePlugin(Star):
         pending_images = event.get_extra("vector_meme_pending_images")
         if not pending_images:
             return
+        event.set_extra("vector_meme_pending_images", None)
         try:
             for image in pending_images:
                 chain = MessageChain([image])
@@ -1581,8 +1853,8 @@ class VectorMemePlugin(Star):
         '''External entry point for other plugins: pick one sticker by emotion/semantic tag.
 
         Contract (agreed with astrbot_plugin_xml_structured_output):
-        - Never raises: empty tag / embedder load failure / timeout / no match
-          all return None.
+        - Never raises: empty tag / unknown tag / embedder load failure / timeout
+          / no match all return None.
         - Does NOT call pick(): no mark_used / anti_repeat writes, so external
           high-frequency calls never pollute the internal dedup pool.
         - Cold embedder triggers one lazy load via _ensure_ready(); subsequent
@@ -1604,7 +1876,10 @@ class VectorMemePlugin(Star):
                 tag = m.group(1)
             if not tag or not self._is_valid_emotion_tag(tag):
                 return None
-            # 冷 embedder：触发一次懒加载（可能较久，但只在外部真正请求 sticker 时发生）
+            if tag not in self._known_tags():
+                logger.debug(f'[{PLUGIN_NAME}] search_sticker_for_external 未知 tag: {tag!r}')
+                return None
+            # 冷 embedder：触发一次懒加载（可能较久，但只在外部真正请求已知 sticker 时发生）
             ready = await self._ensure_ready()
             if ready is None:
                 return None
@@ -1612,17 +1887,18 @@ class VectorMemePlugin(Star):
             max_n = max(int(max_n), 1)
 
             def _search() -> str | None:
+                # rerank=False 关闭随机扰动；topk 取满候选池，保证 max(raw)
+                # 在候选池内是确定性的，相同输入永远返回同一张图。
                 result = retriever.retrieve(
                     text=tag,
                     tag=tag,
-                    topk=max_n,
+                    topk=max(max_n, retriever.candidate_pool_size),
                     anti_repeat=False,
                     fallback_to_all_tags=True,
+                    rerank=False,
                 )
                 if not result.hits:
                     return None
-                # rerank adds random jitter to similarity; pick by raw_similarity
-                # so identical inputs always yield the identical sticker.
                 hit = max(
                     result.hits,
                     key=lambda h: h.raw_similarity if h.raw_similarity is not None else h.similarity,
@@ -1639,6 +1915,16 @@ class VectorMemePlugin(Star):
         except Exception:
             logger.debug(f'[{PLUGIN_NAME}] search_sticker_for_external failed: tag={tag!r}', exc_info=True)
             return None
+
+    def _known_tags(self) -> set[str]:
+        """当前库中真实存在（有可用候选）的 tag 集合。"""
+        if self._db is None:
+            return set()
+        try:
+            return set(self._db.count_by_tag().keys())
+        except Exception:
+            logger.exception(f"[{PLUGIN_NAME}] 读取已知 tag 失败")
+            return set()
 
     def _is_valid_emotion_tag(self, tag: str) -> bool:
         """判断提取出的 tag 是不是一个合法表情标签。

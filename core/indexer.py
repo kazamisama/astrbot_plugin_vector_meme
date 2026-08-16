@@ -17,7 +17,7 @@ import logging
 from pathlib import Path
 from typing import Callable, Iterable
 
-from PIL import Image, UnidentifiedImageError
+from PIL import Image, ImageOps, UnidentifiedImageError
 
 from .database import MemeDatabase, compute_file_hash
 from .embedder import BaseEmbedder
@@ -82,6 +82,7 @@ def _embed_one(embedder: BaseEmbedder, path: Path) -> "object | None":
         with Image.open(path) as img:
             if getattr(img, "is_animated", False):
                 img.seek(0)
+            img = ImageOps.exif_transpose(img)
             return embedder.embed_image(img.convert("RGB"))
     except NotImplementedError:
         # api 后端：图片不可直接编码，主向量留空（由调用方按 skipped 统计，检索走 caption 路）
@@ -143,10 +144,16 @@ class MemeIndexer:
         recursive: bool = True,
         batch_size: int = 16,
         progress: IndexProgress | None = None,
+        tag_root: str | Path | None = None,
     ) -> IndexProgress:
-        """索引一个目录（增量）。"""
+        """索引一个目录（增量）。
+
+        tag_root 用于解析子目录 tag；缺省等于 root。传入更大的 tag_root
+        时，可以扫描 root 子目录但保持与原库一致的 tag 归属。
+        """
         # 统一存绝对路径，避免 cwd 变化后 DB 里的相对路径失效
         root = Path(root).resolve()
+        tag_root = Path(tag_root).resolve() if tag_root is not None else root
         progress = progress or IndexProgress()
 
         files = list(iter_image_files(root, recursive=recursive))
@@ -218,7 +225,7 @@ class MemeIndexer:
         def upsert_without_vector(path: Path):
             """api 后端：图片不可编码，仍入库 meme 记录（vector_id=-1），caption 向量由 enrich 阶段建立。"""
             fhash, w, h, size, _ = file_meta[path]
-            tag = self._resolve_tag(path, root)
+            tag = self._resolve_tag(path, tag_root)
             self.db.upsert_tag(tag, **tag_meta(tag, self.tag_schema))
             is_update = str(path) in existing
             self.db.upsert_meme(

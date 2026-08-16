@@ -3,6 +3,19 @@
 ## [0.7.4] - 2026-08-13
 
 ### 修复
+- 管理命令（索引/重建/修复/caption/删除/重标注等）增加管理员权限校验，索引目录限制为 meme_dir 及其子目录
+- 重建改为“临时库构建成功后原地替换”，失败自动回滚并保留 `.bak.v071`；不再先删旧索引
+- FAISS 空索引也写盘，修复空库重建失败与 compact 到 0 后重启复活孤儿向量的问题
+- DB 记录 embedder 指纹（backend/model/权重/dim），切换不兼容模型时强制提示重建
+- LLM 占位符与外部 `<sticker>` 调用改为按 DB 真实 tag 白名单过滤，未知 tag 不再 fallback 发图
+- `search_sticker_for_external` 关闭随机扰动，相同输入返回相同图片
+- `/vm caption` 复用 `captions.json` 并拒绝非正整数 limit；重建自动迁移旧库 caption
+- FAISS 损坏时 `/vm 修复` 明确指引使用 `/vm 重建`
+- 冷启动搜索/解释/修复/分类/评测/caption 增加加载心跳；状态/健康检查输出补全
+- 普通成员搜索/解释不再触发冷模型加载，需管理员先 `/vm 预热`
+- `/vm 诊断 --deep` 支持比对文件内容 hash
+- 重建保留 `usage_count` / `last_used_at` / `disabled` 以及检索、索引日志
+- OpenCLIP 非本地 pretrained 权重增加模型参数内容摘要指纹
 - 统一写操作互斥，覆盖索引/重建/修复/caption/删除/重标注，降低并发 DB/FAISS 不一致风险
 - 重建改为临时库构建成功后替换，失败保持原库
 - compact_index 原子化，避免索引替换与 DB 重映射之间的错位窗口

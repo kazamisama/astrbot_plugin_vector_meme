@@ -81,3 +81,41 @@ def test_relabel_keeps_old_tag_as_subtag(db):
     assert ok and old == "happy" and new == "laugh"
     sub_tags = json.loads(db.get_meme(mid)["sub_tags"] or "[]")
     assert "happy" in sub_tags
+
+
+def test_save_index_persists_empty_index(tmp_path):
+    db = MemeDatabase(tmp_path / "memes.db", tmp_path / "memes.faiss", dim=8)
+    db.save_index()
+    assert db.index_path.exists()
+    reopened = MemeDatabase(tmp_path / "memes.db", tmp_path / "memes.faiss", dim=8)
+    assert reopened.index_size == 0
+    assert reopened.health_check()["orphan_vector_count"] == 0
+
+
+def test_compact_to_zero_overwrites_old_index_file(tmp_path):
+    db = MemeDatabase(tmp_path / "memes.db", tmp_path / "memes.faiss", dim=8)
+    vids = db.add_vectors(np.ones((1, 8), dtype="float32"))
+    mid = db.upsert_meme("a.png", "h", "happy", int(vids[0]))
+    db.save_index()
+    db.remove_meme(mid)
+    db.compact_index()
+
+    reopened = MemeDatabase(tmp_path / "memes.db", tmp_path / "memes.faiss", dim=8)
+    assert reopened.index_size == 0
+    assert reopened.health_check()["orphan_vector_count"] == 0
+
+
+def test_health_deep_hash_detects_stale_file_content(tmp_path):
+    file_path = tmp_path / "a.png"
+    file_path.write_bytes(b"content-v1")
+    db = MemeDatabase(tmp_path / "m.db", tmp_path / "m.faiss", dim=8)
+    vids = db.add_vectors(np.ones((1, 8), dtype="float32"))
+    db.upsert_meme(str(file_path), "wrong-hash", "happy", int(vids[0]))
+
+    normal = db.health_check(root=tmp_path)
+    assert normal["ok"]
+    assert normal["stale_hash_count"] == 0
+
+    deep = db.health_check(root=tmp_path, verify_hashes=True)
+    assert not deep["ok"]
+    assert deep["stale_hash_count"] == 1

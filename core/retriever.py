@@ -183,8 +183,13 @@ class MemeRetriever:
         anti_repeat: bool = True,
         fallback_to_all_tags: bool = True,
         query_vector: np.ndarray | None = None,
+        rerank: bool = True,
     ) -> RetrievalResult:
-        """用文本检索最匹配的表情。"""
+        """用文本检索最匹配的表情。
+
+        rerank=False 时跳过反重复/使用惩罚/随机扰动，仅按原始相似度排序，
+        供外部确定性调用使用。
+        """
         query_text = self._build_query(text, tag)
         qvec = query_vector if query_vector is not None else self.embedder.embed_text(query_text)
 
@@ -249,12 +254,21 @@ class MemeRetriever:
                 fallback_used=used_fallback,
             ))
 
-        hits = self._rerank(
-            hits,
-            anti_repeat=anti_repeat,
-            requested_tag=original_tag,
-            fallback_used=used_fallback,
-        )[:max(int(topk), 0)]
+        if rerank:
+            hits = self._rerank(
+                hits,
+                anti_repeat=anti_repeat,
+                requested_tag=original_tag,
+                fallback_used=used_fallback,
+            )[:max(int(topk), 0)]
+        else:
+            hits.sort(
+                key=lambda h: h.raw_similarity
+                if h.raw_similarity is not None
+                else h.similarity,
+                reverse=True,
+            )
+            hits = hits[:max(int(topk), 0)]
 
         result = RetrievalResult(
             query_text=query_text,

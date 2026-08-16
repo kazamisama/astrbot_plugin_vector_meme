@@ -22,7 +22,7 @@ from typing import Any, Type
 logger = logging.getLogger(__name__)
 
 import numpy as np
-from PIL import Image
+from PIL import Image, ImageOps
 
 
 class BaseEmbedder(ABC):
@@ -44,11 +44,17 @@ class BaseEmbedder(ABC):
         """向量维度。"""
         ...
 
+    @property
+    def fingerprint(self) -> str:
+        """嵌入空间指纹。模型/权重/提供商变化后必须变化。"""
+        return f"{self.__class__.__name__}:{self.dim}"
+
     def _load_image(self, source: Image.Image | str | Path) -> Image.Image:
         if isinstance(source, Image.Image):
-            img = source.convert("RGB")
+            img = ImageOps.exif_transpose(source).convert("RGB")
         else:
-            img = Image.open(source).convert("RGB")
+            with Image.open(source) as opened:
+                img = ImageOps.exif_transpose(opened).convert("RGB")
         return img
 
     def close(self) -> None:
@@ -127,10 +133,14 @@ class OpenCLIPEmbedder(BaseEmbedder):
         self._model_name = model_name
         self._pretrained = pretrained
         self._cache_dir = cache_dir
+        self._checkpoint_path: str | None = None
+        self._checkpoint_fingerprint: str | None = None
+        self._model_state_digest: str | None = None
 
         # 本地权重：强制跳过 HF / OpenAI 下载。
         if pretrained and Path(str(pretrained)).exists():
             checkpoint_path = str(Path(str(pretrained)).resolve())
+            self._checkpoint_path = checkpoint_path
             self._model, _, self._preprocess = open_clip.create_model_and_transforms(
                 model_name,
                 pretrained=None,
@@ -144,6 +154,7 @@ class OpenCLIPEmbedder(BaseEmbedder):
             if not url:
                 raise RuntimeError(f"{model_name}/{pretrained} 没有可用 URL")
             checkpoint_path = open_clip.download_pretrained_from_url(url, cache_dir=cache_dir)
+            self._checkpoint_path = checkpoint_path
             self._model, _, self._preprocess = open_clip.create_model_and_transforms(
                 model_name,
                 pretrained=None,
@@ -169,9 +180,75 @@ class OpenCLIPEmbedder(BaseEmbedder):
                 feat = self._model.encode_text(token)
             self._dim = int(feat.shape[-1])
 
+        # 在 executor 线程内提前计算权重指纹，避免之后阻塞事件循环
+        if self._checkpoint_path:
+            self._checkpoint_hash()
+        else:
+            self._compute_model_state_digest()
+
     @property
     def dim(self) -> int:
         return self._dim
+
+    @property
+    def fingerprint(self) -> str:
+        parts = ["open_clip", self._model_name, str(self._pretrained), str(self._dim)]
+        if self._checkpoint_path:
+            parts.append(self._checkpoint_hash())
+        else:
+            parts.append(self._compute_model_state_digest())
+        return ":".join(parts)
+
+    def _checkpoint_hash(self) -> str:
+        """checkpoint 内容指纹：大小 + SHA1 前 16 位。"""
+        if self._checkpoint_fingerprint is not None or not self._checkpoint_path:
+            return self._checkpoint_fingerprint or self._checkpoint_path or ""
+        try:
+            path = Path(self._checkpoint_path)
+            h = hashlib.sha1()
+            with path.open("rb") as f:
+                for chunk in iter(lambda: f.read(65536), b""):
+                    h.update(chunk)
+            self._checkpoint_fingerprint = f"{path.stat().st_size}:{h.hexdigest()[:16]}"
+        except OSError:
+            self._checkpoint_fingerprint = self._checkpoint_path
+        return self._checkpoint_fingerprint
+
+    def _compute_model_state_digest(self) -> str:
+        """对已加载权重做内容摘要，覆盖无法拿到 checkpoint 路径的 pretrained 来源。"""
+        if self._model_state_digest is not None:
+            return self._model_state_digest
+        try:
+            torch = self._torch()
+            state_dict = self._model.state_dict()
+            h = hashlib.sha1()
+            for name in sorted(state_dict.keys()):
+                tensor = state_dict[name]
+                if not torch.is_tensor(tensor):
+                    tensor = torch.as_tensor(tensor)
+                tensor = tensor.detach().cpu()
+                h.update(name.encode("utf-8"))
+                h.update(b"|")
+                h.update(str(tensor.dtype).encode("utf-8"))
+                h.update(b"|")
+                h.update(str(tuple(tensor.shape)).encode("utf-8"))
+                h.update(b"|")
+                flat = tensor.reshape(-1)
+                if not flat.is_contiguous():
+                    flat = flat.contiguous()
+                try:
+                    arr = flat.numpy()
+                except TypeError:
+                    arr = flat.float().numpy()
+                step = max(1, (1 << 20) // max(arr.itemsize, 1))
+                for start in range(0, arr.size, step):
+                    h.update(arr[start:start + step].tobytes())
+                h.update(bytes([10]))
+            self._model_state_digest = h.hexdigest()[:20]
+        except Exception as exc:
+            logger.warning("OpenCLIP model state digest failed: %s", exc)
+            self._model_state_digest = f"state-unavailable:{self._dim}"
+        return self._model_state_digest
 
     def _no_grad(self):
         import torch
@@ -239,7 +316,11 @@ class APIEmbedder(BaseEmbedder):
         self._loop_ready.wait(timeout=5.0)
         if self._loop is None:
             raise RuntimeError("api embedder 事件循环启动失败")
-        self._probe()
+        try:
+            self._probe()
+        except Exception:
+            self.close()
+            raise
 
     def _loop_runner(self) -> None:
         self._loop = asyncio.new_event_loop()
@@ -318,6 +399,19 @@ class APIEmbedder(BaseEmbedder):
         if self._dim is None:
             raise RuntimeError("api embedder 尚未初始化维度")
         return self._dim
+
+    @property
+    def fingerprint(self) -> str:
+        prov = self._provider
+        provider_name = type(prov).__name__ if prov is not None else "none"
+        model = ""
+        if prov is not None:
+            for attr in ("model", "model_name", "embedding_model", "name"):
+                value = getattr(prov, attr, None)
+                if value:
+                    model = str(value)
+                    break
+        return ":".join(("api", self._provider_id, provider_name, model, str(self._dim)))
 
     def embed_text(self, text: str) -> np.ndarray:
         vec = self._call(text)

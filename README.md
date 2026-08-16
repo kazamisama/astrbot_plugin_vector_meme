@@ -137,26 +137,28 @@ python scripts/copy_meme_manager_library.py
 
 触发词：`表情向量`（别名 `vmem`、`vm`）。
 
+> 表中 🔒 命令仅管理员可用。
+
 | 命令 | 说明 |
 |---|---|
 | `/vm 状态` | 查看索引状态，不触发模型加载 |
-| `/vm 预热` | 只加载 embedder，提前检查模型可用性 |
-| `/vm 索引 [目录]` | 扫描目录建索引，增量更新 |
-| `/vm 重建` | 清空并重建索引；先备份 `.bak.v071`，成功后才清库，失败保留旧库与备份 |
+| `/vm 预热` 🔒 | 只加载 embedder，提前检查模型可用性 |
+| `/vm 索引 [目录]` 🔒 | 扫描目录建索引，增量更新；目录仅限 `meme_dir` 及其子目录 |
+| `/vm 重建` 🔒 | 在临时库构建成功后替换旧库；先备份 `.bak.v071`，失败保留旧库与备份 |
 | `/vm 列表 [标签]` | 列出指定标签下的表情或整体标签分布 |
 | `/vm 标签` | 列出已注册标签 |
 | `/vm 搜索 <文本> [--tag <标签>]` | 文本检索测试，显示 final/raw 分数 |
 | `/vm 解释 <文本> [--tag <标签>]` | 展示 tag bonus、重复惩罚、随机扰动等选图原因 |
 | `/vm 最近使用 [数量]` | 查看最近发送过的表情 |
-| `/vm 诊断` / `/vm 健康检查` | 检查 DB、FAISS、文件系统一致性，含孤儿向量数 |
-| `/vm 修复` | 清理缺失文件记录、补注册 tag、压缩孤儿向量、刷新 prompt |
-| `/vm 自动分类 <id> [apply]` | 预测标签；默认 dry-run，加 `apply` 才写入数据库 |
-| `/vm 重标注 <id> <新tag>` | 修改数据库主 tag，不移动文件 |
-| `/vm 评测 <eval.json>` | 跑小型分类评测集，输出 top1/top3 准确率 |
+| `/vm 诊断` / `/vm 健康检查 [--deep]` 🔒 | 检查 DB、FAISS、文件系统一致性；`--deep` 额外比对文件内容 hash |
+| `/vm 修复` 🔒 | 清理缺失文件记录、补注册 tag、压缩孤儿向量、刷新 prompt |
+| `/vm 自动分类 <id> [apply]` 🔒 | 预测标签；默认 dry-run，加 `apply` 才写入数据库 |
+| `/vm 重标注 <id> <新tag>` 🔒 | 修改数据库主 tag，不移动文件 |
+| `/vm 评测 <eval.json>` 🔒 | 跑小型分类评测集，输出 top1/top3 准确率 |
 | `/vm 标签规范` | 查看 `tag_schema.json` 标签说明 |
-| `/vm caption [limit]` | 为无 caption 的表情批量生成视觉语义描述 |
-| `/vm caption 导出` | 把 DB 中的 caption 导出到 `memes/captions.json` |
-| `/vm 删除 <id>` | 从索引移除某条记录 |
+| `/vm caption [limit]` 🔒 | 为无 caption 的表情批量生成视觉语义描述，自动复用 `captions.json` |
+| `/vm caption 导出` 🔒 | 把 DB 中的 caption 导出到 `memes/captions.json` |
+| `/vm 删除 <id>` 🔒 | 从索引移除某条记录 |
 | `/vm 刷新提示` | 重新注入表情标签 prompt 到全局人格 |
 | `/vm 帮助` | 显示命令列表 |
 
@@ -252,10 +254,14 @@ python scripts/copy_meme_manager_library.py
 
 `/vm 重建` 顺序：
 
-1. 把 `memes.db` / `memes.faiss` 备份为 `.bak.v071`。
-2. 加载 embedder（跳过维度保护）。
-3. 加载成功后清空旧库并重建。
-4. 成功删除备份；失败保留备份并在消息里提示恢复方法。
+1. 把 `memes.db` / `memes.faiss` 备份为 `.bak.v071`（SQLite 走备份 API，FAISS 在锁内复制）。
+2. 仅加载 embedder，不删除现有库。
+3. 在临时目录构建完整新库（含旧 caption 迁移与 `captions.json` 复用）。
+4. 构建成功后替换磁盘文件并原地切换内存索引；成功才删除备份，失败自动回滚并保留备份。
+5. 重建会保留 `usage_count` / `last_used_at` / `disabled` 以及检索、索引日志。
+
+> 🔒 标记的命令需要管理员权限；普通成员可使用状态/搜索/列表等只读命令。
+> 普通成员的 `搜索` / `解释` 在 embedder 未预热时不会触发模型冷加载，需管理员先执行 `/vm 预热`。
 
 ### 孤儿向量
 
