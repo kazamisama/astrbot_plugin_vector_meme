@@ -1,5 +1,26 @@
 # 更新日志
 
+## [0.8.0] - 2026-08-14
+
+### 变更
+- 检索层重构（针对"不同语义向量常检索出同一张图"）：
+  - **小池扩展**（`tag_pool_expansion`，默认开）：目标 tag 候选不足 `selection_pool_size` 时，按 tag prototype 与查询向量相似度引入最多 `related_tags_topk` 个相关 tag，目标 tag 带 `expanded_tag_bonus` 优先；morning/kfc 等 1-2 张的小 tag 不再"什么语义都只能抽到同一张"
+  - **MMR 多样性重排**（`diversity_rerank`，默认开）：对余弦 ≥ `diversity_threshold` 的近重复图（同表情不同画质/截图）做反冗余排序
+  - **采样锐化**（`weighted_sampling_power=2.0`）：采样权重 = similarity^power，放大 tag 内 0.01~0.03 的扁平分差
+  - **硬排除最近使用**（`hard_exclude_recent`，默认关）：采样前直接剔除反重复窗口内已用图
+  - `tag_bonus` 可配置；`retrieve/pick/pick_multiple` 支持 `query_vector` 与 `expand_pool` 参数；`RetrievalResult` 新增 `expanded_tags` / `pool_size`
+- LLM 检索文本来源（`query_text_source`，默认 `combined`）：用户原话 + 回复文本的向量加权平均（`query_user_weight=0.6`），api 后端自动降级 `user`；也可切回 `reply`（旧行为）
+- 外部入口 `search_sticker_for_external` 保持确定性契约（`expand_pool=False`）；新配置 `external_stochastic`（默认关）可选在 top-3 内随机取图
+
+### 新增
+- `/vm 去重 [preview|apply|undo] [阈值]`：基于 FAISS 向量余弦聚类检测近重复表情变体；apply 每组保留 1 张代表图（使用次数最多），其余禁用并在 sub_tags 标 `dedup:<rep_id>`；undo 可恢复。仅读向量，不触发 embedder 冷启动
+- 新配置组 **近重复治理**：`dedup_threshold`（0.95）、`dedup_min_group`（2）
+- 搜索/解释命令输出显示扩展 tag 与候选池大小
+
+### 修复
+- `DualRetriever` 的 caption 路也支持小池扩展与 MMR，与原图路共用 tag prototype
+- 重建临时目录改为 `data_dir/vector_meme_rebuild_<uuid>` 普通目录，不再用 `tempfile.mkdtemp` 的安全 ACL（0o700）目录：受限环境/沙箱中 sqlite 无法在其内建库会导致重建失败
+
 ## [0.7.4] - 2026-08-13
 
 ### 修复

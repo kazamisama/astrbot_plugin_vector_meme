@@ -153,6 +153,60 @@
         "type": "float",
         "default": 0.015,
         "hint": "仅影响排序扰动，不控制是否随机选图；选图随机由 enable_stochastic_selection 控制。0 表示关闭"
+      },
+      "weighted_sampling_power": {
+        "description": "加权采样锐化指数（>=1）",
+        "type": "float",
+        "default": 2.0,
+        "hint": "采样权重 = similarity^power。当 tag 内相似度差距极小（常见 0.01~0.03）时，默认 1 的权重几乎均匀、不同语义向量抽到同一张图的概率很高；调大（如 3-5）会让高分候选明显占优，降低随机撞图；1 表示维持旧行为"
+      },
+      "tag_bonus": {
+        "description": "命中目标 tag 的相似度加成",
+        "type": "float",
+        "default": 0.035,
+        "hint": "检索分数 = 相似度 + tag_bonus - 惩罚 + 扰动。小池扩展场景下该加成会被 expanded_tag_bonus 叠加"
+      },
+      "tag_pool_expansion": {
+        "description": "目标 tag 候选数不足 selection_pool_size 时，扩展到语义最近的相关 tag",
+        "type": "bool",
+        "default": true,
+        "hint": "核心修复：避免 morning(1张)/kfc(2张) 等小 tag 无论什么语义向量都只能抽到同一张图。扩展按 tag prototype 与查询向量的相似度选择相关 tag；目标 tag 仍带额外加成，语义足够近时优先于误出相关 tag"
+      },
+      "related_tags_topk": {
+        "description": "小池扩展时引入的相关 tag 数量",
+        "type": "int",
+        "default": 2,
+        "hint": "推荐 1-3。0 表示只保留目标 tag（关闭扩展）"
+      },
+      "expanded_tag_bonus": {
+        "description": "小池扩展命中目标 tag 时的额外加成",
+        "type": "float",
+        "default": 0.08,
+        "hint": "扩展后相关 tag 的图片会混入候选，该项保证目标 tag 图片只有在语义明显更差时才被相关 tag 顶掉"
+      },
+      "diversity_rerank": {
+        "description": "池内近重复去重（MMR）",
+        "type": "bool",
+        "default": true,
+        "hint": "对余弦 >= diversity_threshold 的近重复图（同一表情的不同画质/尺寸/截图）做反冗余排序，避免同一簇霸占前几名导致不同查询都命中同一张"
+      },
+      "diversity_threshold": {
+        "description": "视为近重复的余弦阈值",
+        "type": "float",
+        "default": 0.92,
+        "hint": "0.90-0.95 之间较稳。太高（如 0.98）只拦截几乎相同的图，太低会误伤真正不同的表情"
+      },
+      "diversity_strength": {
+        "description": "MMR 抑制强度（0-1）",
+        "type": "float",
+        "default": 0.5,
+        "hint": "每个候选最终分 = 原始分 - strength × 与已选候选的最大余弦（超过阈值时）。0 关闭抑制"
+      },
+      "hard_exclude_recent": {
+        "description": "采样前直接剔除反重复窗口内已用图（软惩罚的加强版）",
+        "type": "bool",
+        "default": false,
+        "hint": "候选池全部在窗口内时仍保留原候选。开启可大幅降低短时间重复，代价是可能选到语义稍弱的图"
       }
     }
   },
@@ -187,7 +241,23 @@
         "type": "string",
         "default": ""
       },
-
+      "query_text_source": {
+        "description": "检索用的文本来源",
+        "type": "string",
+        "default": "combined",
+        "options": [
+          "combined",
+          "user",
+          "reply"
+        ],
+        "hint": "reply=LLM 回复文本（旧行为）；user=用户原话（最能反映真实意图）；combined=两者向量加权平均（推荐，融合对话上下文与用户情绪）。embedder_backend=api 时 combined 会自动降级为 user（避免一次回复两次 API 调用）"
+      },
+      "query_user_weight": {
+        "description": "combined 模式下用户文本向量的权重（其余归 LLM 回复）",
+        "type": "float",
+        "default": 0.6,
+        "hint": "0.5-0.7 之间较稳；越大越偏用户原话"
+      },
       "enable_mixed_message": {
         "description": "自动表情是否混合到同一条回复中",
         "type": "bool",
@@ -204,6 +274,12 @@
         "type": "int",
         "default": 80,
         "hint": "CLIP 对短文本更敏感；长文本会稀释语义。0 表示不截断"
+      },
+      "external_stochastic": {
+        "description": "外部 <sticker> 调用是否结束确定性",
+        "type": "bool",
+        "default": false,
+        "hint": "默认 false：相同 tag 永远返回同一张图（与 xml_structured_output 的契约）。开启后改为在 top-3 内随机取一张（不写使用记录），降低重复"
       }
     }
   },
@@ -228,6 +304,23 @@
       },
       "prototype_min_samples": {
         "description": "构建 tag prototype 所需的最少样本数",
+        "type": "int",
+        "default": 2
+      }
+    }
+  },
+  "dedup": {
+    "description": "近重复治理（/vm 去重）",
+    "type": "object",
+    "items": {
+      "dedup_threshold": {
+        "description": "判定近重复的余弦阈值",
+        "type": "float",
+        "default": 0.95,
+        "hint": "/vm 去重 命令的默认阈值；虚拟相似度 >= 阈值的图片视为同一张表情的变体"
+      },
+      "dedup_min_group": {
+        "description": "一个簇至少包含几张图才参与去重",
         "type": "int",
         "default": 2
       }

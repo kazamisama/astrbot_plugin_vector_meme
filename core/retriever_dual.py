@@ -28,6 +28,7 @@ class DualRetriever(MemeRetriever):
         anti_repeat_window: int = 20,
         candidate_pool_size: int = 12,
         random_jitter: float = 0.015,
+        **kwargs: Any,
     ):
         super().__init__(
             db,
@@ -35,6 +36,7 @@ class DualRetriever(MemeRetriever):
             anti_repeat_window=anti_repeat_window,
             candidate_pool_size=candidate_pool_size,
             random_jitter=random_jitter,
+            **kwargs,
         )
         self.caption_weight = max(min(float(caption_weight), 1.0), 0.0)
 
@@ -120,6 +122,7 @@ class DualRetriever(MemeRetriever):
         anti_repeat: bool = True,
         fallback_to_all_tags: bool = True,
         rerank: bool = True,
+        expand_pool: bool | None = None,
     ) -> Any:
         internal_topk = max(int(topk), self.candidate_pool_size)
         query_text = self._build_query(text, tag)
@@ -132,9 +135,12 @@ class DualRetriever(MemeRetriever):
             fallback_to_all_tags=fallback_to_all_tags,
             query_vector=query_vector,
             rerank=rerank,
+            expand_pool=expand_pool,
         )
         if self.caption_weight <= 0:
             return base
+
+        expanded_tags: list[str] = list(base.expanded_tags or [])
 
         cap_candidates = self._caption_candidates(tag)
         cap_fallback = False
@@ -143,6 +149,23 @@ class DualRetriever(MemeRetriever):
             cap_fallback = True
         if not cap_candidates:
             return base
+
+        # caption 候选同样做小池扩展（与图片路径共享 related-tag 原型）
+        use_expand = self.expand_small_pool if expand_pool is None else bool(expand_pool)
+        if (
+            use_expand
+            and not cap_fallback
+            and tag
+            and cap_candidates
+            and len(cap_candidates) < self.candidate_pool_size
+        ):
+            cap_candidates, extra_tags = self._expand_candidates(
+                query_vector, tag, cap_candidates, self.db.list_caption_vector_ids
+            )
+            if extra_tags:
+                for t in extra_tags:
+                    if t not in expanded_tags:
+                        expanded_tags.append(t)
 
         cap_scores = self._search_caption_path(query_vector, cap_candidates, internal_topk)
         if not cap_scores:
@@ -156,6 +179,8 @@ class DualRetriever(MemeRetriever):
                     anti_repeat=anti_repeat,
                     requested_tag=base.original_tag,
                     fallback_used=cap_fallback,
+                    vectors_by_meme_id=self._vectors_by_meme_id([h.meme_id for h in caption_hits]),
+                    expanded_tags=expanded_tags or None,
                 )[:max(int(topk), 0)]
             else:
                 caption_hits.sort(
@@ -166,6 +191,7 @@ class DualRetriever(MemeRetriever):
                 )
                 base.hits = caption_hits[:max(int(topk), 0)]
             base.used_fallback = cap_fallback
+            base.expanded_tags = expanded_tags or None
             if base.hits:
                 self.db.log_search(
                     query_text=text,
@@ -221,8 +247,11 @@ class DualRetriever(MemeRetriever):
                 anti_repeat=anti_repeat,
                 requested_tag=base.original_tag,
                 fallback_used=(base.used_fallback or cap_fallback),
+                vectors_by_meme_id=self._vectors_by_meme_id([h.meme_id for h in fused_hits]),
+                expanded_tags=expanded_tags or None,
             )[:max(int(topk), 0)]
         else:
             fused_hits.sort(key=lambda h: h.similarity, reverse=True)
             base.hits = fused_hits[:max(int(topk), 0)]
+        base.expanded_tags = expanded_tags or None
         return base

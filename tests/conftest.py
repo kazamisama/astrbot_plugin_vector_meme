@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import importlib.util
 import logging
+import shutil
 import sys
 import types
 from pathlib import Path
@@ -12,6 +13,28 @@ import pytest
 ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
+
+
+@pytest.fixture()
+def tmp_path():
+    """覆盖 pytest 内置 tmp_path：在本工作区临时目录创建。
+
+    沙箱环境里 tempfile.mkdtemp(0o700) / 系统 temp 目录的枚举与清理会触发
+    权限错误，这里改成工作区内 os.mkdir + uuid，可写可清理。
+    """
+    import os
+    import uuid
+
+    scratch = ROOT / "_ptest2"
+    scratch.mkdir(parents=True, exist_ok=True)
+    d = scratch / f"t-{uuid.uuid4().hex[:12]}"
+    d.mkdir()
+    yield d
+    shutil.rmtree(d, ignore_errors=True)
+    try:
+        scratch.rmdir()
+    except OSError:
+        pass
 
 
 def _make_module(name: str, **attrs) -> types.ModuleType:

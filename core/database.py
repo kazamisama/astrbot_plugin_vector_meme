@@ -562,6 +562,25 @@ class MemeDatabase:
         with self._conn() as c:
             c.execute("UPDATE memes SET disabled = ? WHERE id = ?", (int(disabled), meme_id))
 
+    def append_meme_subtag(self, meme_id: int, subtag: str) -> None:
+        """向 meme 的 sub_tags 追加一个子标签（去重后保留）。"""
+        with self._conn() as c:
+            row = c.execute("SELECT sub_tags FROM memes WHERE id = ?", (int(meme_id),)).fetchone()
+            if row is None:
+                return
+            try:
+                tags = json.loads(row["sub_tags"] or "[]")
+                if not isinstance(tags, list):
+                    tags = []
+            except Exception:
+                tags = []
+            if subtag and subtag not in [str(t) for t in tags]:
+                tags.append(subtag)
+            c.execute(
+                "UPDATE memes SET sub_tags = ?, updated_at = ? WHERE id = ?",
+                (json.dumps(tags, ensure_ascii=False), time.time(), int(meme_id)),
+            )
+
     def relabel_meme(self, meme_id: int, new_tag: str, keep_old_as_subtag: bool = True) -> tuple[bool, str | None, str | None]:
         """重标注 meme 的主 tag，不移动文件。
 

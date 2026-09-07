@@ -42,3 +42,7 @@ Thumbs.db
 .env
 .venv/
 venv/
+.venv-test/
+
+# Test scratch (tests/conftest.py tmp_path override)
+_ptest2/

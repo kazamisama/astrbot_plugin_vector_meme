@@ -1,4 +1,4 @@
-﻿"""vector_meme 插件主入口。
+"""vector_meme 插件主入口。
 
 提供：
 - 索引管理命令
@@ -11,10 +11,13 @@ import asyncio
 import contextlib
 import json
 import os
+import random
 import re
 import shutil
-import tempfile
+import uuid
 from pathlib import Path
+
+import numpy as np
 
 from astrbot.api import logger
 from astrbot.api.all import *  # noqa: F403
@@ -54,7 +57,7 @@ STICKER_BLOCK_RE = re.compile(r"<sticker[^>]*>.*?</sticker>", re.DOTALL | re.IGN
 # 需要管理员权限的命令：这些命令会修改索引/数据库、读取本地路径或产生模型/API 成本
 ADMIN_ONLY_SUBCOMMANDS = {
     "预热", "索引", "重建", "修复", "诊断", "健康检查", "健康",
-    "自动分类", "分类", "评测", "重标注", "删除", "刷新提示", "caption",
+    "自动分类", "分类", "评测", "重标注", "删除", "去重", "刷新提示", "caption",
 }
 
 # 普通成员可使用，但不允许触发冷启动模型加载（避免成本型滥用）
@@ -113,7 +116,7 @@ PERSONA_INJECT_RE = re.compile(
     PLUGIN_NAME,
     "chiriu & 橘雪莉",
     "基于向量检索的智能表情包插件",
-    "0.7.4",
+    "0.8.0",
 )
 class VectorMemePlugin(Star):
     def __init__(self, context: Context, config: dict | None = None):
@@ -196,6 +199,15 @@ class VectorMemePlugin(Star):
             anti_repeat_window=int(self.config.get("anti_repeat_window", 20)),
             candidate_pool_size=int(self.config.get("selection_pool_size", 12)),
             random_jitter=float(self.config.get("selection_random_jitter", 0.015)),
+            tag_bonus=float(self.config.get("tag_bonus", 0.035)),
+            expand_small_pool=bool(self.config.get("tag_pool_expansion", True)),
+            related_tag_topk=int(self.config.get("related_tags_topk", 2)),
+            expanded_tag_bonus=float(self.config.get("expanded_tag_bonus", 0.08)),
+            diversity_enabled=bool(self.config.get("diversity_rerank", True)),
+            diversity_similarity_threshold=float(self.config.get("diversity_threshold", 0.92)),
+            diversity_strength=float(self.config.get("diversity_strength", 0.5)),
+            weighted_sampling_power=float(self.config.get("weighted_sampling_power", 2.0)),
+            hard_exclude_recent=bool(self.config.get("hard_exclude_recent", False)),
         )
         if self.caption_enabled and hasattr(retriever, "caption_weight"):
             if self._backend_name == "api":
@@ -574,6 +586,7 @@ class VectorMemePlugin(Star):
                 "tag_schema": self._cmd_tag_schema,
                 "重标注": self._cmd_relabel,
                 "删除": self._cmd_delete,
+                "去重": self._cmd_dedup,
                 "刷新提示": self._cmd_reload_prompt,
                 "帮助": self._cmd_help,
                 'caption': self._cmd_caption,
@@ -978,9 +991,11 @@ class VectorMemePlugin(Star):
 
                 reporter_done = asyncio.Event()
                 reporter_task = asyncio.create_task(_progress_reporter())
-                tmp_dir = Path(
-                    tempfile.mkdtemp(prefix="vector_meme_rebuild_", dir=self.data_dir)
-                )
+                # 不用 tempfile.mkdtemp：其 Windows 安全 ACL(0o700) 会让部分
+                # 受限环境/沙箱中 sqlite 无法在目录内建库；改为默认权限的
+                # 唯一目录，行为与 data_dir 下其他文件一致。
+                tmp_dir = self.data_dir / f"vector_meme_rebuild_{uuid.uuid4().hex[:12]}"
+                tmp_dir.mkdir(parents=True, exist_ok=False)
                 tmp_db_path = tmp_dir / "memes.db"
                 tmp_index_path = tmp_dir / "memes.faiss"
                 try:
@@ -1144,7 +1159,8 @@ class VectorMemePlugin(Star):
         if not result:
             yield event.plain_result("未找到匹配")
             return
-        chain = [Plain(f"搜索: {text}\n标签: {tag or '全库'}\n匹配:\n")]
+        ext = f"扩展tag: {', '.join(result.expanded_tags)}\n" if result.expanded_tags else ""
+        chain = [Plain(f"搜索: {text}\n标签: {tag or '全库'}\n{ext}匹配:\n")]
         for h in result.hits:
             raw = h.raw_similarity if h.raw_similarity is not None else h.similarity
             chain.append(Plain(f"  #{h.meme_id} final={h.similarity:.3f} raw={raw:.3f} {h.name}\n"))
@@ -1194,8 +1210,12 @@ class VectorMemePlugin(Star):
             f"- query: {text}",
             f"- tag_filter: {tag or '全库'}",
             f"- fallback: {'yes' if result.used_fallback else 'no'}",
-            "- top candidates:",
         ]
+        if result.expanded_tags:
+            lines.append(f"- 小池扩展 tag: {', '.join(result.expanded_tags)}")
+        if result.pool_size is not None:
+            lines.append(f"- 候选池大小: {result.pool_size}")
+        lines.append("- top candidates:")
         for i, h in enumerate(result.hits[:5], start=1):
             lines.append(f"  {i}. #{h.meme_id} {h.name} [{h.tag}] final={h.similarity:.3f} raw={(h.raw_similarity if h.raw_similarity is not None else h.similarity):.3f}")
             detail = []
@@ -1596,6 +1616,84 @@ class VectorMemePlugin(Star):
             'caption done: total={total}, ok={ok}, failed={failed}'.format(**result)
         )
 
+    async def _cmd_dedup(self, event: AstrMessageEvent, rest: list[str] | None = None):
+        """近重复表情簇检测与应用（只读 FAISS 向量，不需要 embedder，不触发冷启动）。"""
+        from .core.dedup import DEDUP_TAG_PREFIX, apply_dedup, cluster_near_duplicates, undo_dedup
+
+        default_threshold = float(self.config.get("dedup_threshold", 0.95))
+        min_group = int(self.config.get("dedup_min_group", 2))
+
+        def _parse_float(s: str, fallback: float) -> float:
+            try:
+                return float(s)
+            except Exception:
+                return fallback
+
+        if self._db is None or self._db.total_row_count() <= 0:
+            yield event.plain_result("库为空，无可去重数据")
+            return
+        db = self._db
+
+        sub = "preview"
+        threshold = default_threshold
+        if rest:
+            head = rest[0].strip().lower()
+            if head in ("preview", "apply", "undo", "rollback", "撤销"):
+                sub = {
+                    "undo": "undo",
+                    "rollback": "undo",
+                    "撤销": "undo",
+                    "apply": "apply",
+                }.get(head, "preview")
+                if len(rest) >= 2:
+                    threshold = _parse_float(rest[1], default_threshold)
+            else:
+                # 直接给数值阈值 → preview
+                threshold = _parse_float(head, default_threshold)
+
+        if sub == "undo":
+            res = undo_dedup(db)
+            yield event.plain_result(
+                f"已恢复 {res['count']} 张被去重禁用的图片（sub_tags 中的 {DEDUP_TAG_PREFIX} 标记已清除）"
+            )
+            return
+
+        groups = cluster_near_duplicates(db, threshold=threshold, min_group=min_group)
+        dup_total = sum(len(g.dup_ids) for g in groups)
+        member_total = sum(len(g.members) for g in groups)
+        if not groups:
+            yield event.plain_result(
+                f"阈值 {threshold:.3f} 下未发现近重复簇（min_group={min_group}）"
+            )
+            return
+
+        if sub == "apply":
+            stats = apply_dedup(db, threshold=threshold, min_group=min_group, dry_run=False)
+            yield event.plain_result(
+                f"去重完成：{stats['groups']} 组，保留 {len(stats['kept'])} 张代表图，"
+                f"禁用 {len(stats['disabled'])} 张。每张被禁用图片的 sub_tags 已标记 "
+                f"{DEDUP_TAG_PREFIX}<rep_id>，可用 /vm 去重 undo 恢复"
+            )
+            return
+
+        yield event.plain_result(
+            f"近重复簇（阈值 {threshold:.3f}）：{len(groups)} 组 / {member_total} 张，"
+            f"可去重 {dup_total} 张（每组保留 1 张代表图）\n"
+            f"预览前 15 组（# 代表图 ← 成员）："
+        )
+        for g in groups[:15]:
+            members = [
+                f"#{int(m['id'])}"
+                for m in g.members
+                if int(m["id"]) != int(g.rep_id)
+            ]
+            yield event.plain_result(
+                f"  #{g.rep_id} [{g.rep_tag}] {Path(g.rep_path).name} ← {', '.join(members)}"
+            )
+        yield event.plain_result(
+            "确认无误后执行：/vm 去重 apply [阈值]；撤销：/vm 去重 undo"
+        )
+
     async def _cmd_help(self, event: AstrMessageEvent, rest: list[str] | None = None):
         yield event.plain_result(
             f"[{PLUGIN_NAME}] 用法：\n"
@@ -1615,6 +1713,7 @@ class VectorMemePlugin(Star):
             "  表情向量 标签规范\n"
             "  表情向量 重标注 <id> <新tag>\n"
             "  表情向量 删除 <id>\n"
+            "  表情向量 去重 [preview|apply|undo] [阈值]\n"
             "  表情向量 caption [limit] / caption 导出\n"
             "  表情向量 刷新提示\n"
             "  表情向量 帮助"
@@ -1703,6 +1802,11 @@ class VectorMemePlugin(Star):
 
             event.set_extra("vector_meme_pending_tags", filtered_tags)
             event.set_extra("vector_meme_query_text", clean_text or text)
+            # 记录用户原话，供检索端按 query_text_source 选择（combined/user）
+            event.set_extra(
+                "vector_meme_user_text",
+                (getattr(event, "message_str", None) or "").strip(),
+            )
             logger.info(f"[{PLUGIN_NAME}] 捕获待发送表情标签: {filtered_tags}")
         except Exception:
             logger.exception(f"[{PLUGIN_NAME}] llm hook 出错")
@@ -1715,11 +1819,16 @@ class VectorMemePlugin(Star):
             return
 
         tags = event.get_extra("vector_meme_pending_tags") or []
-        query_text = event.get_extra("vector_meme_query_text") or ""
-        # 截断 query_text：CLIP 对短句更敏感，长回复会稀释语义
+        reply_text = event.get_extra("vector_meme_query_text") or ""
+        user_text = (event.get_extra("vector_meme_user_text") or "").strip()
+        # 截断查询文本：CLIP 对短句更敏感，长文本会稀释语义
         qmax = int(self.config.get("query_text_max_length", 80))
-        if qmax > 0 and len(query_text) > qmax:
-            query_text = query_text[:qmax]
+
+        def _clip(t: str) -> str:
+            return t[:qmax] if (qmax > 0 and len(t) > qmax) else t
+
+        reply_text = _clip(reply_text)
+        user_text = _clip(user_text)
 
         try:
             # 清理占位符：in-place 修改 Plain.text，保留原对象引用，避免破坏其他插件/装饰器对原链的依赖。
@@ -1763,17 +1872,47 @@ class VectorMemePlugin(Star):
             retriever, _, _ = ready
 
             loop = asyncio.get_running_loop()
+
+            # 查询向量来源：reply（旧行为）/ user / combined（向量加权平均）。
+            # api 后端一次回复两次 API 调用太慢，combined 自动降级为 user。
+            def _compute_query_vector():
+                source = str(self.config.get("query_text_source", "combined")).strip().lower()
+                if self._backend_name == "api" and source == "combined":
+                    source = "user"
+                if source == "user":
+                    if user_text:
+                        return self._embedder.embed_text(user_text)
+                    return None
+                if source == "combined":
+                    if user_text and reply_text:
+                        u = self._embedder.embed_text(user_text)
+                        r = self._embedder.embed_text(reply_text)
+                        w = float(self.config.get("query_user_weight", 0.6))
+                        v = (w * u + (1.0 - w) * r).astype("float32")
+                        n = float(np.linalg.norm(v))
+                        return (v / (n + 1e-9)) if n > 0 else None
+                    if user_text:
+                        return self._embedder.embed_text(user_text)
+                return None  # reply 或无可用文本 → 沿用旧行为（用 reply_text / tag 名）
+
+            qvec = (
+                await loop.run_in_executor(None, _compute_query_vector)
+                if (user_text or reply_text)
+                else None
+            )
+
             images = []
             for tag in tags:
                 hit = await loop.run_in_executor(
                     None,
                     lambda t=tag: retriever.pick(
-                        text=query_text or t,
+                        text=(reply_text or user_text or t),
                         tag=t,
                         anti_repeat=True,
                         fallback_to_all_tags=True,
                         selection_pool_size=int(self.config.get("selection_pool_size", 12)),
                         stochastic=bool(self.config.get("enable_stochastic_selection", True)),
+                        query_vector=qvec,
                     ),
                 )
                 if hit:
@@ -1889,6 +2028,7 @@ class VectorMemePlugin(Star):
             def _search() -> str | None:
                 # rerank=False 关闭随机扰动；topk 取满候选池，保证 max(raw)
                 # 在候选池内是确定性的，相同输入永远返回同一张图。
+                # expand_pool=False：不扩展小池，维持"tag → 固定图"的外部契约。
                 result = retriever.retrieve(
                     text=tag,
                     tag=tag,
@@ -1896,9 +2036,14 @@ class VectorMemePlugin(Star):
                     anti_repeat=False,
                     fallback_to_all_tags=True,
                     rerank=False,
+                    expand_pool=False,
                 )
                 if not result.hits:
                     return None
+                if bool(self.config.get("external_stochastic", False)):
+                    # 可选：同 tag 在 top-3 内随机（不写使用记录），降低外部反复调用同图
+                    hit = random.choice(result.hits[:3])
+                    return hit.file_path
                 hit = max(
                     result.hits,
                     key=lambda h: h.raw_similarity if h.raw_similarity is not None else h.similarity,

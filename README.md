@@ -67,9 +67,10 @@ memes/
 2. **模型与设备**：`embedder_backend`、`embedding_provider_id`、设备、OpenCLIP 模型/权重/缓存、HF 镜像
 3. **语义增强（vision caption）**：`enable_vision_caption`、`vision_provider_id`、caption 权重与批量
 4. **索引与标签**：子目录 tag、默认 tag
-5. **检索选择与反重复**：反重复窗口、采样池、随机扰动
-6. **LLM 标签与发送**：占位符格式、prompt 注入、触发概率、发送数量
+5. **检索选择与反重复**：反重复窗口、采样池、随机扰动、小池扩展（tag_pool_expansion）、多样性重排（diversity_rerank）、采样锐化（weighted_sampling_power）、硬排除最近使用（hard_exclude_recent）
+6. **LLM 标签与发送**：占位符格式、prompt 注入、检索文本来源（query_text_source：user / combined）、发送数量
 7. **自动分类与评测**：prototype/KNN 分类阈值与样本数
+8. **近重复治理（/vm 去重）**：去重阈值与最小簇大小
 
 推荐初始配置：
 
@@ -87,7 +88,15 @@ memes/
   "anti_repeat_window": 20,
   "selection_pool_size": 12,
   "enable_stochastic_selection": true,
-  "selection_random_jitter": 0.015
+  "selection_random_jitter": 0.015,
+  "weighted_sampling_power": 2.0,
+  "tag_pool_expansion": true,
+  "related_tags_topk": 2,
+  "diversity_rerank": true,
+  "diversity_threshold": 0.92,
+  "diversity_strength": 0.5,
+  "query_text_source": "combined",
+  "query_user_weight": 0.6
 }
 ```
 
@@ -202,11 +211,18 @@ python scripts/copy_meme_manager_library.py
 
 1. 从 LLM 回复提取 `%%tag%%`（sticker 块除外）。
 2. 按 tag 限定候选图片；该 tag 无候选时回退到全库并标记 `fallback`。
-3. 用回复文本生成查询向量。
-4. 在候选集内检索最相近的 TopK（FAISS 全量扫描 + IDSelector 过滤候选）。
-5. 混合打分：相似度 + tag 加权 - 近期/高频惩罚 + 小随机扰动。
-6. 在 TopK 内按分数加权随机采样（可关闭）。
-7. 记录使用日志，短期避免重复。
+3. 用检索文本生成查询向量：默认 `combined`（用户原话 + LLM 回复的向量加权平均），
+   也可切回 `reply`（旧行为）或 `user`（仅用户原话）。
+4. **小池扩展**：目标 tag 候选数不足 `selection_pool_size` 时，按 tag prototype
+   与查询向量的相似度引入最多 `related_tags_topk` 个相关 tag（目标 tag 带
+   `expanded_tag_bonus` 优先），避免 morning(1张)/kfc(2张) 这类小 tag 无论什么
+   语义都只能抽到同一张图。
+5. 在候选集内检索最相近的 TopK（FAISS 全量扫描 + IDSelector 过滤候选）。
+6. 混合打分：相似度 + tag 加权 - 近期/高频惩罚 + 小随机扰动。
+7. **多样性重排（MMR）**：对余弦 ≥ `diversity_threshold` 的近重复图
+   （同一表情的不同画质/尺寸/截图）做反冗余排序，避免同一簇霸占前几名。
+8. 在 TopK 内按分数加权随机采样（`weighted_sampling_power` 锐化分数差，可关闭）。
+9. 记录使用日志，短期避免重复；`hard_exclude_recent` 开启时在采样前直接剔除窗口内已用图。
 
 关键配置：
 
@@ -214,6 +230,10 @@ python scripts/copy_meme_manager_library.py
 - `enable_stochastic_selection`：控制是否随机选图；关闭后固定选最高分。
 - `selection_random_jitter`：仅影响排序扰动，不控制是否随机选图；0 关闭。
 - `anti_repeat_window`：同一张图多少条消息内不重复使用。
+- `tag_pool_expansion`：小 tag 自动扩展相关 tag（默认开，解决"不同语义向量检索出同一张图"的最主要成因）。
+- `weighted_sampling_power`：采样权重 = similarity^power；默认 2.0，调大（3-5）让高分候选明显占优。
+- `diversity_rerank` / `diversity_threshold`：池内近重复去重。
+- `query_text_source`：检索文本来源，默认 `combined`（api 后端自动降级 `user`）。
 
 ## 标签治理与自动分类
 
