@@ -122,11 +122,23 @@ class DualRetriever(MemeRetriever):
         anti_repeat: bool = True,
         fallback_to_all_tags: bool = True,
         rerank: bool = True,
+        query_vector: np.ndarray | None = None,
         expand_pool: bool | None = None,
     ) -> Any:
+        """与基类签名保持一致，query_vector 非空时直接复用，不再重复调用 embedder。
+
+        回归背景：v0.8.0 给 pick()/pick_multiple() 加了 query_vector 直传，但本方法
+        当时漏了同名参数。api 后端恒走 DualRetriever，于是每次自动表情都抛
+        TypeError: DualRetriever.retrieve() got an unexpected keyword argument
+        'query_vector'，被 on_decorating_result 的兜底 except 吞掉——内容检索、
+        反重复、加权采样整条路径静默失效，只剩外部 <sticker> 直查在出图。
+        """
         internal_topk = max(int(topk), self.candidate_pool_size)
         query_text = self._build_query(text, tag)
-        query_vector = self.embedder.embed_text(query_text)
+        if query_vector is None:
+            query_vector = self.embedder.embed_text(query_text)
+        else:
+            query_vector = np.asarray(query_vector, dtype="float32").reshape(-1)
         base = super().retrieve(
             text=text,
             tag=tag,

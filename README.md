@@ -201,7 +201,9 @@ python scripts/copy_meme_manager_library.py
 - XML 插件通过 `search_sticker_for_external()` 调用本插件取图；
 - vector_meme 不提取、不清理 `<sticker>...</sticker>` 块内的 `%%tag%%`，避免 XML 插件丢 sticker；
 - 外部调用超时 30 秒，冷启动时触发一次 embedder 懒加载；
-- 外部调用不写反重复池（不调用 `pick()`），高频调用不会污染内部去重窗口；
+- 外部调用默认参与反重复（`external_dedup`，默认开）：先从候选池里剔除反重复窗口内已发过的图
+  （全被用过时回落最高分），再把结果写入使用记录，因此同一个 tag 不会在任意多条对话里
+  永远返回同一张图；排序本身仍是确定性的。设为 `false` 可恢复旧行为（相同 tag 永远同一张图、不写使用记录）；
 - 空 tag、加载失败、超时或无命中一律返回 `None`，不抛异常；
 - 本插件的 `%%tag%%` 链路与 XML 链路可并存。
 

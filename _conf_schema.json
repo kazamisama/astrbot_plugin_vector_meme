@@ -279,7 +279,13 @@
         "description": "外部 <sticker> 调用是否结束确定性",
         "type": "bool",
         "default": false,
-        "hint": "默认 false：相同 tag 永远返回同一张图（与 xml_structured_output 的契约）。开启后改为在 top-3 内随机取一张（不写使用记录），降低重复"
+        "hint": "默认 false：候选池内按相似度取最高分。开启后改为在过滤后的 top-3 内随机取一张（是否写使用记录见 external_dedup）"
+      },
+      "external_dedup": {
+        "description": "外部 <sticker> 调用是否参与反重复",
+        "type": "bool",
+        "default": true,
+        "hint": "开启（推荐）：外部取图先避开反重复窗口内已发过的图，并把结果写入使用记录，同一 tag 不会在多条不同对话里永远返回同一张图；关闭：恢复旧的纯确定性行为（相同 tag 永远同一张图，且不写使用记录）"
       }
     }
   },

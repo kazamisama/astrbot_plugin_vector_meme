@@ -1,5 +1,15 @@
 # 更新日志
 
+## [0.8.1] - 2026-09-21
+
+### 修复
+- **api 后端自动表情整条路径静默失效**：`DualRetriever.retrieve()` 漏了 v0.8.0 新增的 `query_vector` 参数，而 `MemeRetriever.pick()/pick_multiple()` 总是以关键字传入，导致 `TypeError: DualRetriever.retrieve() got an unexpected keyword argument 'query_vector'`，被 `on_decorating_result` 的兜底 except 吞掉——LLM 直接输出 `%%tag%%` 时一张图都发不出，内容检索 / 反重复窗口 / 加权采样全部等于没上线。已补齐参数并新增 `tests/test_retriever_dual.py` 回归
+- **不同对话检索出同一张表情**：外部入口 `search_sticker_for_external()` 是纯确定性的 tag→图 映射，且**从不写使用记录**，因此反重复窗口永远是空的，同一个 tag 在任意多条对话里永远返回同一张图（生产日志中 `tag=shy` 一天内 13 次全部命中同一文件）。新配置 `external_dedup`（默认开）让外部入口先避开反重复窗口内已发过的图、并把结果写回使用记录；设 false 可恢复旧行为
+
+### 变更
+- `search_sticker_for_external()` 契约更新：排序仍是确定性的（`rerank=False` / `expand_pool=False`），但候选池会按反重复窗口过滤，返回后调用 `mark_used`。XML 插件侧接口不变（仍返回路径或 `None`）
+- `external_stochastic` 文案修正：随机取图也走过滤后的候选池
+
 ## [0.8.0] - 2026-08-14
 
 ### 变更

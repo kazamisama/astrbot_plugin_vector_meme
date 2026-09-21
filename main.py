@@ -116,7 +116,7 @@ PERSONA_INJECT_RE = re.compile(
     PLUGIN_NAME,
     "chiriu & 橘雪莉",
     "基于向量检索的智能表情包插件",
-    "0.8.0",
+    "0.8.1",
 )
 class VectorMemePlugin(Star):
     def __init__(self, context: Context, config: dict | None = None):
@@ -1994,8 +1994,11 @@ class VectorMemePlugin(Star):
         Contract (agreed with astrbot_plugin_xml_structured_output):
         - Never raises: empty tag / unknown tag / embedder load failure / timeout
           / no match all return None.
-        - Does NOT call pick(): no mark_used / anti_repeat writes, so external
-          high-frequency calls never pollute the internal dedup pool.
+        - The ranking itself stays deterministic (rerank=False：无 jitter / MMR；
+          expand_pool=False：不扩展小池），但候选池会先按反重复窗口过滤、并在返回后
+          写入使用记录（external_dedup，默认开），否则同一个 tag 在任意多条不同对话里
+          永远返回同一张图。要恢复旧的"相同 tag 永远同一张图、不写使用记录"行为，
+          把 external_dedup 设为 false。
         - Cold embedder triggers one lazy load via _ensure_ready(); subsequent
           calls reuse the warm embedder.
         - The search portion (embed + DB query) is bounded by a 30s timeout,
@@ -2024,11 +2027,12 @@ class VectorMemePlugin(Star):
                 return None
             retriever, _, _ = ready
             max_n = max(int(max_n), 1)
+            external_dedup = bool(self.config.get("external_dedup", True))
 
             def _search() -> str | None:
-                # rerank=False 关闭随机扰动；topk 取满候选池，保证 max(raw)
-                # 在候选池内是确定性的，相同输入永远返回同一张图。
-                # expand_pool=False：不扩展小池，维持"tag → 固定图"的外部契约。
+                # rerank=False 关闭随机扰动；topk 取满候选池，保证候选池内按 raw
+                # 相似度排序是可复现的。expand_pool=False：不扩展小池，维持
+                # "tag → 该 tag 内的图" 的外部契约。
                 result = retriever.retrieve(
                     text=tag,
                     tag=tag,
@@ -2040,14 +2044,28 @@ class VectorMemePlugin(Star):
                 )
                 if not result.hits:
                     return None
+                pool = list(result.hits)
+                # 反重复：优先避开反重复窗口内已发过的图。外部入口以前完全不写使用
+                # 记录，导致窗口永远是空的、同一 tag 每一条不同对话都返回同一张图。
+                if external_dedup and len(pool) > 1:
+                    recent = retriever.db.get_recently_used_ids(retriever.anti_repeat_window)
+                    fresh = [h for h in pool if h.meme_id not in recent]
+                    if fresh:
+                        pool = fresh  # 全部用过时保留原池，保证仍能出图
                 if bool(self.config.get("external_stochastic", False)):
-                    # 可选：同 tag 在 top-3 内随机（不写使用记录），降低外部反复调用同图
-                    hit = random.choice(result.hits[:3])
-                    return hit.file_path
-                hit = max(
-                    result.hits,
-                    key=lambda h: h.raw_similarity if h.raw_similarity is not None else h.similarity,
-                )
+                    # 可选：候选池内随机（不写使用记录时也不会反复撞同一张）
+                    hit = random.choice(pool[:3])
+                else:
+                    hit = max(
+                        pool,
+                        key=lambda h: h.raw_similarity if h.raw_similarity is not None else h.similarity,
+                    )
+                if external_dedup:
+                    # 写失败（DB 锁等）不能连图一起丢掉：契约是 Never raises
+                    try:
+                        retriever.db.mark_used(hit.meme_id)
+                    except Exception as e:
+                        logger.warning(f"[{PLUGIN_NAME}] 外部入口写使用记录失败: {e}")
                 return hit.file_path
 
             # api 后端单次 embedding 可达 ~20s；超时对齐 embedder 内部上限（60s）

@@ -14,10 +14,10 @@ def test_version_consistency():
     main_src = (ROOT / "main.py").read_text(encoding="utf-8")
     meta = (ROOT / "metadata.yaml").read_text(encoding="utf-8")
     changelog = (ROOT / "CHANGELOG.md").read_text(encoding="utf-8")
-    assert '"0.8.0"' in main_src
-    assert re.search(r"^version:\s*0\.8\.0\s*$", meta, re.MULTILINE)
+    assert '"0.8.1"' in main_src
+    assert re.search(r"^version:\s*0\.8\.1\s*$", meta, re.MULTILINE)
     assert changelog.startswith("# 更新日志")
-    assert "## [0.8.0]" in changelog
+    assert "## [0.8.1]" in changelog
 
 
 def test_migrate_script_defines_config_file():
@@ -47,7 +47,7 @@ def test_persona_marker_roundtrip(main_module):
     assert main_module.PERSONA_INJECT_RE.sub("", injected) == "base prompt"
 
 
-def _make_plugin(tmp_path, personas, main_module):
+def _make_plugin(tmp_path, personas, main_module, **extra_config):
     class FakeProviderManager:
         def __init__(self):
             self.personas = personas
@@ -58,15 +58,14 @@ def _make_plugin(tmp_path, personas, main_module):
 
     meme_dir = tmp_path / "memes"
     meme_dir.mkdir(exist_ok=True)
-    return main_module.VectorMemePlugin(
-        FakeContext(),
-        {
-            "data_dir": str(tmp_path / "data"),
-            "meme_dir": str(meme_dir),
-            "embedder_backend": "dummy",
-            "enable_prompt_injection": True,
-        },
-    )
+    config = {
+        "data_dir": str(tmp_path / "data"),
+        "meme_dir": str(meme_dir),
+        "embedder_backend": "dummy",
+        "enable_prompt_injection": True,
+    }
+    config.update(extra_config)
+    return main_module.VectorMemePlugin(FakeContext(), config)
 
 
 def test_persona_marker_injection_idempotent(tmp_path, main_module):
@@ -293,3 +292,49 @@ def test_member_search_does_not_cold_load_embedder(tmp_path, main_module):
     assert event.stopped
     assert plugin._embedder is None
     assert any("尚未预热" in str(r) for r in results)
+
+
+async def _prepare_external_candidates(plugin, tag="happy", texts=("happy", "angry", "sad")):
+    """加载 embedder/retriever 后造 3 张同 tag 的图向量，返回 [(meme_id, resolved_path)]。"""
+    await plugin._ensure_ready()
+    emb = plugin._embedder
+    db = plugin._db
+    out = []
+    for i, text in enumerate(texts):
+        path = plugin.meme_dir / f"{tag}_{i}.png"
+        vids = db.add_vectors(emb.embed_text(text))
+        mid = db.upsert_meme(str(path), f"h{i}", tag, int(vids[0]), file_name=path.name)
+        out.append((mid, str(path.resolve())))
+    db.save_index()
+    return out
+
+
+def test_external_sticker_rotates_within_tag(tmp_path, main_module):
+    """回归：外部入口过去不写使用记录，同一 tag 在任意多条对话里永远返回同一张图。"""
+    plugin = _make_plugin(tmp_path, [], main_module)
+
+    async def _run():
+        candidates = await _prepare_external_candidates(plugin)
+        got = [await plugin.search_sticker_for_external(tag="happy") for _ in range(4)]
+        return candidates, got
+
+    candidates, got = asyncio.run(_run())
+    assert all(got)
+    assert got[0] == candidates[0][1]      # 最高相似度优先
+    assert len(set(got[:3])) == 3          # 反重复窗口内轮换三张不同的图
+    assert got[3] == got[0]                # 全部用过 → 回落到最高分，不会没图
+    assert plugin._db.get_meme(candidates[0][0])["usage_count"] == 2
+
+
+def test_external_sticker_dedup_can_be_disabled(tmp_path, main_module):
+    """external_dedup=False 恢复旧契约：相同 tag 永远同一张图，且不写使用记录。"""
+    plugin = _make_plugin(tmp_path, [], main_module, external_dedup=False)
+
+    async def _run():
+        candidates = await _prepare_external_candidates(plugin)
+        got = [await plugin.search_sticker_for_external(tag="happy") for _ in range(2)]
+        return candidates, got
+
+    candidates, got = asyncio.run(_run())
+    assert got[0] == got[1] == candidates[0][1]
+    assert plugin._db.get_meme(candidates[0][0])["usage_count"] == 0
