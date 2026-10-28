@@ -24,9 +24,17 @@
 
 ## 快速开始
 
+默认使用 `open_clip` 本地视觉后端，需安装含 PyTorch 的完整依赖（约 2.5GB）：
+
 ```bash
 git clone https://github.com/kazamisama/astrbot_plugin_vector_meme.git
 cd astrbot_plugin_vector_meme
+pip install -r requirements-openclip.txt
+```
+
+若改用 `api` 后端（AstrBot 已配置 Embedding 提供商），只装核心依赖、不装 torch：
+
+```bash
 pip install -r requirements.txt
 ```
 
@@ -55,7 +63,8 @@ memes/
 
 | 后端 | 说明 |
 |---|---|
-| `open_clip`（默认） | 本地 OpenCLIP，图片 + 文本双模态向量 |
+| `open_clip`（默认） | 本地 OpenCLIP，图片 + 文本双模态向量；需 `requirements-openclip.txt` |
+
 | `api` | 调用 AstrBot 已配置的 Embedding 提供商；图片不可直接编码，必须依赖 vision caption，检索走 caption 文本向量；`/vm 自动分类` 不可用 |
 | `dummy` | 随机向量，仅用于测试链路 |
 
@@ -321,6 +330,11 @@ astrbot_plugin_vector_meme/
 ```
 
 ## 故障排查
+
+### 预热/索引时报「未安装 open_clip_torch」
+
+- 默认本地后端缺少可选依赖：`pip install -r requirements-openclip.txt`；
+- 或改用 `api` 后端并在 AstrBot 配置 Embedding 提供商，无需 PyTorch。
 
 ### OpenCLIP 下载失败
 

@@ -126,7 +126,9 @@ class OpenCLIPEmbedder(BaseEmbedder):
             import open_clip  # type: ignore
         except ImportError as e:
             raise RuntimeError(
-                "未安装 open_clip_torch，请先 pip install open_clip_torch"
+                "未安装 open_clip_torch（OpenCLIP 本地视觉后端）："
+                "请执行 pip install -r requirements-openclip.txt；"
+                "或把 embedder_backend 改为 api（需 AstrBot 已配置 Embedding 提供商）"
             ) from e
 
         self._device = device

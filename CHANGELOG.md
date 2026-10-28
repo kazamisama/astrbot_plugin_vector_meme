@@ -1,5 +1,11 @@
 # 更新日志
 
+## [Unreleased]
+
+### 变更
+- 依赖拆分：`requirements.txt` 只保留 numpy / Pillow / faiss 核心依赖；torch + open_clip_torch 移到 `requirements-openclip.txt`，改用 `api` / `dummy` 后端时无需安装约 2.5GB 的 PyTorch
+- 未安装 `open_clip_torch` 时的报错改为给出可执行的安装/改配置指引，而不是只抛 ImportError 文案
+
 ## [0.8.2] - 2026-10-28
 
 > 0.8.1 之后的维护改动；无用户可见的行为变更。

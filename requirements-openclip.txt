@@ -1,0 +1,10 @@
+# OpenCLIP 本地视觉后端（插件默认后端）的完整依赖，约 2.5GB
+#
+#     pip install -r requirements-openclip.txt
+#
+# 只使用 api / dummy 后端时无需安装本文件，装 requirements.txt 即可。
+
+-r requirements.txt
+
+torch>=2.0
+open_clip_torch>=2.20
