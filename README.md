@@ -1,5 +1,7 @@
 # astrbot_plugin_vector_meme
 
+[![CI](https://github.com/kazamisama/astrbot_plugin_vector_meme/actions/workflows/ci.yml/badge.svg)](https://github.com/kazamisama/astrbot_plugin_vector_meme/actions/workflows/ci.yml)
+
 基于向量检索的 AstrBot 智能表情包插件，当前版本 **0.8.1**。
 
 插件用 CLIP/OpenCLIP 把表情图片编码为向量。LLM 只需要在回复里输出情绪/场景占位符（`%%happy%%`）或配合 XML 结构化输出插件输出 `<sticker>happy</sticker>` 标记，具体发送哪张图由向量相似度、标签权重、反重复策略和随机采样共同决定。
@@ -343,11 +345,18 @@ astrbot_plugin_vector_meme/
 
 ## 开发与测试
 
-测试依赖仅用于开发，不进入插件运行时依赖：
+测试依赖仅用于开发，不进入插件运行时依赖（不含 torch / open_clip，测试走 `DummyEmbedder`）：
 
 ```bash
 pip install -r tests/requirements-dev.txt
 python -m pytest tests -q
+```
+
+覆盖率与 CI 用同一条命令，门禁 55%：
+
+```bash
+python -m coverage run --source=. --omit="tests/*,scripts/*,.venv/*,.venv-test/*,.cache/*" -m pytest tests -q
+python -m coverage report --fail-under=55
 ```
 
 常用检查：
@@ -368,4 +377,4 @@ python scripts/build_openclip_index.py --meme-dir memes --data-dir .cache
 
 ## License
 
-未指定许可证。发布前如需开源复用，请补充 LICENSE。
+本项目采用 [MIT License](LICENSE)。

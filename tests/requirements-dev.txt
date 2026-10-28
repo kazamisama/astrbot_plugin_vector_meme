@@ -1,1 +1,8 @@
+# 开发/测试依赖（不进入插件运行时依赖）
 pytest>=8.0
+coverage>=7.0
+
+# 测试只需要这几个运行时库；torch / open_clip 走 DummyEmbedder，CI 不装
+numpy>=1.24
+Pillow>=10.0
+faiss-cpu>=1.7.4
