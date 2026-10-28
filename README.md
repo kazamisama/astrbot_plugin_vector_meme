@@ -150,6 +150,8 @@ python scripts/copy_meme_manager_library.py
 
 > 表中 🔒 命令仅管理员可用。
 
+<!-- commands:start -->
+<!-- 此表由 scripts/gen_command_docs.py 从 core/command_spec.py 生成，勿手改 -->
 | 命令 | 说明 |
 |---|---|
 | `/vm 状态` | 查看索引状态，不触发模型加载 |
@@ -164,15 +166,16 @@ python scripts/copy_meme_manager_library.py
 | `/vm 诊断` / `/vm 健康检查 [--deep]` 🔒 | 检查 DB、FAISS、文件系统一致性；`--deep` 额外比对文件内容 hash |
 | `/vm 修复` 🔒 | 清理缺失文件记录、补注册 tag、压缩孤儿向量、刷新 prompt |
 | `/vm 自动分类 <id> [apply]` 🔒 | 预测标签；默认 dry-run，加 `apply` 才写入数据库 |
-| `/vm 重标注 <id> <新tag>` 🔒 | 修改数据库主 tag，不移动文件 |
+| `/vm 重标注 <id> <新tag>` 🔒 | 手动修改数据库主 tag，不移动文件 |
 | `/vm 评测 <eval.json>` 🔒 | 跑小型分类评测集，输出 top1/top3 准确率 |
 | `/vm 标签规范` | 查看 `tag_schema.json` 标签说明 |
 | `/vm caption [limit]` 🔒 | 为无 caption 的表情批量生成视觉语义描述，自动复用 `captions.json` |
 | `/vm caption 导出` 🔒 | 把 DB 中的 caption 导出到 `memes/captions.json` |
 | `/vm 删除 <id>` 🔒 | 从索引移除某条记录 |
 | `/vm 去重 [preview/apply/undo] [阈值]` 🔒 | 检测近重复表情变体（默认 preview）；apply 时每组保留 1 张、其余禁用，undo 可恢复 |
-| `/vm 刷新提示` | 重新注入表情标签 prompt 到全局人格 |
+| `/vm 刷新提示` 🔒 | 重新注入表情标签 prompt 到全局人格 |
 | `/vm 帮助` | 显示命令列表 |
+<!-- commands:end -->
 
 > `/vm 搜索` 只认显式 `--tag <name>`，不再用“最后一个词是 tag”的启发式，避免查询文本里恰好出现标签名时被误判。
 
@@ -357,6 +360,13 @@ python -m pytest tests -q
 ```bash
 python -m coverage run --source=. --omit="tests/*,scripts/*,.venv/*,.venv-test/*,.cache/*" -m pytest tests -q
 python -m coverage report --fail-under=55
+```
+
+命令表与版本号由 `core/command_spec.py` / `core/version.py` 生成，改完命令后运行：
+
+```bash
+python scripts/gen_command_docs.py          # 重写 README 命令表与 metadata.yaml
+python scripts/gen_command_docs.py --check  # 只检查（CI 用）
 ```
 
 常用检查：

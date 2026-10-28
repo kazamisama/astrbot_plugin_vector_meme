@@ -22,6 +22,9 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r tests/requirements-dev.txt
 
+      - name: Docs drift check
+        run: python scripts/gen_command_docs.py --check
+
       - name: Syntax check
         run: python -m compileall -q main.py core tests scripts
 

@@ -1,6 +1,5 @@
 import asyncio
 import importlib.util
-import re
 from pathlib import Path
 
 import numpy as np
@@ -8,16 +7,6 @@ import pytest
 from PIL import Image
 
 ROOT = Path(__file__).resolve().parent.parent
-
-
-def test_version_consistency():
-    main_src = (ROOT / "main.py").read_text(encoding="utf-8")
-    meta = (ROOT / "metadata.yaml").read_text(encoding="utf-8")
-    changelog = (ROOT / "CHANGELOG.md").read_text(encoding="utf-8")
-    assert '"0.8.1"' in main_src
-    assert re.search(r"^version:\s*0\.8\.1\s*$", meta, re.MULTILINE)
-    assert changelog.startswith("# 更新日志")
-    assert "## [0.8.1]" in changelog
 
 
 def test_migrate_script_defines_config_file():

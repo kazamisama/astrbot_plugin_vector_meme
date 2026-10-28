@@ -30,10 +30,18 @@ from astrbot.api.star import Context, Star, register
 from astrbot.core.message.message_event_result import MessageChain, ResultContentType
 
 from .core import BaseEmbedder, EmbedderFactory, MemeDatabase, MemeIndexer, MemeRetriever
+from .core.command_spec import (
+    ADMIN_ONLY_SUBCOMMANDS,
+    COMMAND_HANDLERS,
+    DEFAULT_COMMAND,
+    MEMBER_COLD_LOAD_GATED_SUBCOMMANDS,
+    render_vm_help,
+)
 from .core.indexer import tag_meta
 from .core.captioner import CaptionGenerator, enrich_meme_captions
 from .core.retriever_dual import DualRetriever
 from .core.indexer import IndexProgress
+from .core.version import VERSION
 
 try:
     # AstrBot v4.25.5：命令 handler 剩余参数按 GreedyStr 注解聚合为完整字符串
@@ -55,14 +63,9 @@ LEGACY_TAG_PATTERN = re.compile(r"&&\s*([a-zA-Z0-9_\-一-鿿]+)\s*&&|:\s*([a-zA-
 # vector_meme 不提取、不清理块内的 %%tag%% 占位符，避免该插件静默丢弃 sticker。
 STICKER_BLOCK_RE = re.compile(r"<sticker[^>]*>.*?</sticker>", re.DOTALL | re.IGNORECASE)
 
-# 需要管理员权限的命令：这些命令会修改索引/数据库、读取本地路径或产生模型/API 成本
-ADMIN_ONLY_SUBCOMMANDS = {
-    "预热", "索引", "重建", "修复", "诊断", "健康检查", "健康",
-    "自动分类", "分类", "评测", "重标注", "删除", "去重", "刷新提示", "caption",
-}
-
-# 普通成员可使用，但不允许触发冷启动模型加载（避免成本型滥用）
-MEMBER_COLD_LOAD_GATED_SUBCOMMANDS = {"搜索", "解释", "为什么"}
+# 管理员/冷启动门控的子命令集合由 core.command_spec 统一导出：
+# MAIN 只保留语义说明——管理命令会修改索引/数据库、读取本地路径或产生模型/API 成本；
+# 搜索/解释 普通成员可用，但要求 embedder 已预热，避免成本型滥用。
 
 
 def strip_tags_outside_stickers(text: str, allow_legacy: bool = False) -> str:
@@ -117,7 +120,7 @@ PERSONA_INJECT_RE = re.compile(
     PLUGIN_NAME,
     "chiriu & 橘雪莉",
     "基于向量检索的智能表情包插件",
-    "0.8.1",
+    VERSION,
 )
 class VectorMemePlugin(Star):
     def __init__(self, context: Context, config: dict | None = None):
@@ -561,40 +564,13 @@ class VectorMemePlugin(Star):
     async def _dispatch_command(self, event: AstrMessageEvent, args: list[str]):
         """统一命令分发。支持 @filter.command 和普通文本监听共用。"""
         if not args:
-            sub = "状态"
-            handler = self._cmd_status
+            sub = DEFAULT_COMMAND
             rest = []
         else:
             sub = args[0]
             rest = list(args[1:])
-            handler = {
-                "状态": self._cmd_status,
-                "预热": self._cmd_prewarm,
-                "索引": self._cmd_index,
-                "重建": self._cmd_rebuild,
-                "列表": self._cmd_list,
-                "标签": self._cmd_tags,
-                "搜索": self._cmd_search,
-                "解释": self._cmd_explain,
-                "为什么": self._cmd_explain,
-                "最近使用": self._cmd_recent,
-                "最近": self._cmd_recent,
-                "诊断": self._cmd_health,
-                "健康检查": self._cmd_health,
-                "健康": self._cmd_health,
-                "修复": self._cmd_repair,
-                "自动分类": self._cmd_auto_classify,
-                "分类": self._cmd_auto_classify,
-                "评测": self._cmd_eval,
-                "标签规范": self._cmd_tag_schema,
-                "tag_schema": self._cmd_tag_schema,
-                "重标注": self._cmd_relabel,
-                "删除": self._cmd_delete,
-                "去重": self._cmd_dedup,
-                "刷新提示": self._cmd_reload_prompt,
-                "帮助": self._cmd_help,
-                'caption': self._cmd_caption,
-            }.get(sub, self._cmd_help)
+        handler_name = COMMAND_HANDLERS.get(sub)
+        handler = getattr(self, handler_name) if handler_name else self._cmd_help
 
         is_admin = self._event_is_admin(event)
         if sub in ADMIN_ONLY_SUBCOMMANDS and not is_admin:
@@ -1622,29 +1598,7 @@ class VectorMemePlugin(Star):
         )
 
     async def _cmd_help(self, event: AstrMessageEvent, rest: list[str] | None = None):
-        yield event.plain_result(
-            f"[{PLUGIN_NAME}] 用法：\n"
-            "  表情向量 状态\n"
-            "  表情向量 预热\n"
-            "  表情向量 索引 [目录]\n"
-            "  表情向量 重建\n"
-            "  表情向量 列表 [标签]\n"
-            "  表情向量 标签\n"
-            "  表情向量 搜索 <文本> [--tag <标签>]\n"
-            "  表情向量 解释 <文本> [--tag <标签>]\n"
-            "  表情向量 最近使用 [数量]\n"
-            "  表情向量 诊断 / 健康检查\n"
-            "  表情向量 修复\n"
-            "  表情向量 自动分类 <id> [apply]\n"
-            "  表情向量 评测 <eval.json>\n"
-            "  表情向量 标签规范\n"
-            "  表情向量 重标注 <id> <新tag>\n"
-            "  表情向量 删除 <id>\n"
-            "  表情向量 去重 [preview|apply|undo] [阈值]\n"
-            "  表情向量 caption [limit] / caption 导出\n"
-            "  表情向量 刷新提示\n"
-            "  表情向量 帮助"
-        )
+        yield event.plain_result(render_vm_help(PLUGIN_NAME))
 
     # ---------- LLM 回复钩子 / 发送装饰 ----------
 
