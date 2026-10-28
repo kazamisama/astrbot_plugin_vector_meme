@@ -277,6 +277,7 @@ python scripts/copy_meme_manager_library.py
 - `.cache/` 是离线建索引脚本的输出目录，已 git 忽略。
 - `models/` 存放 OpenCLIP/HuggingFace 权重与缓存，已 git 忽略。
 - `memes/` 表情图库和 `memes/captions.json` 纳入 git 跟踪，便于跨机器迁移。
+- 排查运行库：`python scripts/diag_db.py` 以只读方式打印表结构、向量映射与使用分布（支持 `--db` / `--json`）。
 
 ### 重建与备份
 
