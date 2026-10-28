@@ -173,7 +173,7 @@ python scripts/copy_meme_manager_library.py
 | `/vm 解释 <文本> [--tag <标签>]` | 展示 tag bonus、重复惩罚、随机扰动等选图原因 |
 | `/vm 最近使用 [数量]` | 查看最近发送过的表情 |
 | `/vm 诊断` / `/vm 健康检查 [--deep]` 🔒 | 检查 DB、FAISS、文件系统一致性；`--deep` 额外比对文件内容 hash |
-| `/vm 修复` 🔒 | 清理缺失文件记录、补注册 tag、压缩孤儿向量、刷新 prompt |
+| `/vm 修复` 🔒 | 清理缺失文件记录、补注册 tag、压缩孤儿向量、裁剪检索/索引日志、刷新 prompt |
 | `/vm 自动分类 <id> [apply]` 🔒 | 预测标签；默认 dry-run，加 `apply` 才写入数据库 |
 | `/vm 重标注 <id> <新tag>` 🔒 | 手动修改数据库主 tag，不移动文件 |
 | `/vm 评测 <eval.json>` 🔒 | 跑小型分类评测集，输出 top1/top3 准确率 |
@@ -287,6 +287,7 @@ python scripts/copy_meme_manager_library.py
 - `models/` 存放 OpenCLIP/HuggingFace 权重与缓存，已 git 忽略。
 - `memes/` 表情图库和 `memes/captions.json` 纳入 git 跟踪，便于跨机器迁移。
 - 排查运行库：`python scripts/diag_db.py` 以只读方式打印表结构、向量映射与使用分布（支持 `--db` / `--json`）。
+- 日志有上限：`search_log` / `index_log` 只保留最近 2000 / 3000 条（`core/database.py` 中的 `SEARCH_LOG_KEEP` / `INDEX_LOG_KEEP`），插件启动与 `/vm 修复` 会自动裁剪最旧记录，避免长时间运行后 SQLite 无限膨胀。
 
 ### 重建与备份
 

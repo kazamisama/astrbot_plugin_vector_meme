@@ -5,6 +5,7 @@
 ### 变更
 - 依赖拆分：`requirements.txt` 只保留 numpy / Pillow / faiss 核心依赖；torch + open_clip_torch 移到 `requirements-openclip.txt`，改用 `api` / `dummy` 后端时无需安装约 2.5GB 的 PyTorch
 - 未安装 `open_clip_torch` 时的报错改为给出可执行的安装/改配置指引，而不是只抛 ImportError 文案
+- 日志裁剪：`search_log` / `index_log` 只保留最近 2000 / 3000 条（`SEARCH_LOG_KEEP` / `INDEX_LOG_KEEP`），插件启动与 `/vm 修复` 自动清理最旧记录；`/vm 修复` 输出新增「裁剪日志」计数
 
 ## [0.8.2] - 2026-10-28
 

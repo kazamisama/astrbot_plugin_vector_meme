@@ -30,6 +30,10 @@ except ImportError:
 
 logger = logging.getLogger(__name__)
 
+# 日志表保留上限：防止长期运行后 search_log / index_log 无限膨胀
+SEARCH_LOG_KEEP = 2000
+INDEX_LOG_KEEP = 3000
+
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS memes (
@@ -698,6 +702,23 @@ class MemeDatabase:
                    VALUES (?, ?, ?, ?)""",
                 (action, file_path, status, message),
             )
+
+    def trim_logs(self, search_keep: int | None = None, index_keep: int | None = None) -> dict:
+        """只保留最近 N 条检索/索引日志，返回各表删除的行数。"""
+        search_keep = SEARCH_LOG_KEEP if search_keep is None else max(int(search_keep), 0)
+        index_keep = INDEX_LOG_KEEP if index_keep is None else max(int(index_keep), 0)
+        removed = {}
+        with self._conn() as c:
+            for table, keep in (("search_log", search_keep), ("index_log", index_keep)):
+                before = c.execute(f"SELECT COUNT(*) AS n FROM {table}").fetchone()["n"]
+                if before > keep:
+                    c.execute(
+                        f"DELETE FROM {table} WHERE id NOT IN "
+                        f"(SELECT id FROM {table} ORDER BY id DESC LIMIT ?)",
+                        (keep,),
+                    )
+                removed[table] = max(before - keep, 0)
+        return removed
 
     # ---------- 维护 ----------
 

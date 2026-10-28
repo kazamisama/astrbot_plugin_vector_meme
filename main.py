@@ -183,6 +183,12 @@ class VectorMemePlugin(Star):
             index_path=self.data_dir / "memes.faiss",
             dim=INIT_TEMP_DIM,
         )
+        try:
+            trimmed = self._db.trim_logs()
+            if any(trimmed.values()):
+                logger.info(f"[{PLUGIN_NAME}] 日志裁剪: {trimmed}")
+        except Exception as exc:
+            logger.warning(f"[{PLUGIN_NAME}] 启动日志裁剪失败: {exc}")
 
     def _make_indexer(self, db: MemeDatabase) -> MemeIndexer:
         """按当前配置为指定数据库创建索引器。"""
@@ -1249,6 +1255,7 @@ class VectorMemePlugin(Star):
             )
             counts = db.count_by_tag()
             stale_tags = self._sync_tag_registry(db)
+            log_trim = await asyncio.to_thread(db.trim_logs)
 
             live_vectors = await asyncio.to_thread(db.live_vector_count)
             orphan_threshold = max(50, int(live_vectors * 0.2))
@@ -1271,7 +1278,10 @@ class VectorMemePlugin(Star):
                         'caption: total={total}, ok={ok}, failed={failed}'.format(**caption_result)
                     )
         yield event.plain_result(
-            f"\u4fee\u590d\u5b8c\u6210\n- \u6e05\u7406\u7f3a\u5931\u6587\u4ef6\u8bb0\u5f55: {removed}\n- \u6ce8\u518c/\u786e\u8ba4 tag: {len(counts)}\n- \u6e05\u7406\u6b8b\u7559 tag: {stale_tags}\n{compact_line}- \u5df2\u5237\u65b0 prompt"
+            f"修复完成\n- 清理缺失文件记录: {removed}\n- 注册/确认 tag: {len(counts)}\n"
+            f"- 清理残留 tag: {stale_tags}\n"
+            f"- 裁剪日志: search_log {log_trim['search_log']} / index_log {log_trim['index_log']}\n"
+            f"{compact_line}- 已刷新 prompt"
         )
 
 

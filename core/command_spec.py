@@ -155,8 +155,8 @@ COMMANDS: tuple[CommandSpec, ...] = (
     CommandSpec(
         name="修复",
         handler="_cmd_repair",
-        summary="清理缺失文件记录、补注册 tag、刷新 prompt",
-        doc="清理缺失文件记录、补注册 tag、压缩孤儿向量、刷新 prompt",
+        summary="清理缺失文件、补注册 tag、压缩孤儿向量、裁剪日志、刷新 prompt",
+        doc="清理缺失文件记录、补注册 tag、压缩孤儿向量、裁剪检索/索引日志、刷新 prompt",
         admin_only=True,
         section=SECTION_DIAG,
     ),
