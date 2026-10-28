@@ -28,6 +28,7 @@ help: |
     /vm 评测 <eval.json>      - 跑小型分类评测集
     /vm 标签规范              - 查看 tag_schema.json 标签说明
     /vm caption [limit]       - 为无 caption 的表情批量生成视觉语义描述
+    /vm caption 导出          - 把 DB 中的 caption 导出到 memes/captions.json
 
   LLM 集成：
     在回复中输出 %%happy%% 这类占位符，插件会移除占位符并追加匹配图片。

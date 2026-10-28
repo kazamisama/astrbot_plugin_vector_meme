@@ -54,34 +54,6 @@ class MemeHit:
     def name(self) -> str:
         return Path(self.file_path).name
 
-    @property
-    def explain_lines(self) -> list[str]:
-        lines = [
-            f"id=#{self.meme_id} file={self.name}",
-            f"tag={self.tag}",
-            f"raw_similarity={(self.raw_similarity if self.raw_similarity is not None else self.similarity):.3f}",
-            f"final_score={self.similarity:.3f}",
-        ]
-        if self.tag_bonus:
-            lines.append(f"tag_bonus=+{self.tag_bonus:.3f}")
-        if self.repeat_penalty:
-            lines.append(f"repeat_penalty=-{self.repeat_penalty:.3f}")
-        if self.usage_penalty:
-            lines.append(f"usage_penalty=-{self.usage_penalty:.3f}")
-        if self.random_jitter:
-            sign = "+" if self.random_jitter >= 0 else ""
-            lines.append(f"random_jitter={sign}{self.random_jitter:.3f}")
-        if self.fallback_used:
-            lines.append("fallback=目标 tag 无候选，已回退全库")
-        if self.rank_before_rerank is not None:
-            lines.append(f"rank_before_rerank={self.rank_before_rerank}")
-        if self.last_used_at:
-            elapsed = max(time.time() - self.last_used_at, 0)
-            lines.append(f"last_used={elapsed:.0f}s ago")
-        if self.usage_count:
-            lines.append(f"usage_count={self.usage_count}")
-        return lines
-
 
 @dataclass
 class RetrievalResult:

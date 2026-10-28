@@ -252,12 +252,6 @@ class MemeDatabase:
             self._index.add(vectors)
             return np.arange(start_id, start_id + vectors.shape[0], dtype=np.int64)
 
-    def reset_index(self) -> None:
-        """用当前维度新建空索引（带锁），用于重建。"""
-        with self._lock:
-            self.index_corrupted = False
-            self._index = faiss.IndexFlatIP(self.dim)
-
     def search(self, query: np.ndarray, topk: int = 10) -> tuple[np.ndarray, np.ndarray]:
         """返回 (相似度, vector_id)。"""
         query = query.astype("float32").reshape(1, -1)
@@ -384,11 +378,6 @@ class MemeDatabase:
             cur = c.execute("DELETE FROM memes WHERE id = ?", (meme_id,))
             return cur.rowcount > 0
 
-    def remove_meme_by_path(self, file_path: str) -> bool:
-        with self._conn() as c:
-            cur = c.execute("DELETE FROM memes WHERE file_path = ?", (file_path,))
-            return cur.rowcount > 0
-
     def copy_runtime_state_from(self, source: "MemeDatabase") -> int:
         """从旧库复制运行时状态（使用统计/禁用标记/日志），用于重建保留历史。"""
         with source._conn() as c:
@@ -462,11 +451,6 @@ class MemeDatabase:
             row = c.execute("SELECT * FROM memes WHERE id = ?", (meme_id,)).fetchone()
             return dict(row) if row else None
 
-    def get_meme_by_vector_id(self, vector_id: int) -> dict | None:
-        with self._conn() as c:
-            row = c.execute("SELECT * FROM memes WHERE vector_id = ?", (vector_id,)).fetchone()
-            return dict(row) if row else None
-
     def get_meme_by_path(self, file_path: str) -> dict | None:
         with self._conn() as c:
             row = c.execute("SELECT * FROM memes WHERE file_path = ?", (file_path,)).fetchone()
@@ -492,8 +476,11 @@ class MemeDatabase:
             rows = c.execute(sql, params).fetchall()
             return [dict(r) for r in rows]
 
-    def list_candidate_vector_ids(self, tag: str | None = None) -> list[tuple[int, int]]:
-        sql = "SELECT id, vector_id FROM memes WHERE disabled = 0"
+    def _list_vector_ids(self, column: str, tag: str | None = None) -> list[tuple[int, int]]:
+        """收集有效向量 (vector_id, meme_id)；column 只接受白名单列名。"""
+        if column not in ("vector_id", "caption_vector_id"):
+            raise ValueError(f"unsupported vector column: {column}")
+        sql = f"SELECT id, {column} FROM memes WHERE disabled = 0"
         params: list[Any] = []
         if tag:
             sql += " AND tag = ?"
@@ -503,32 +490,22 @@ class MemeDatabase:
         max_size = self.index_size
         out: list[tuple[int, int]] = []
         for r in rows:
+            raw = r[column]
+            if raw is None:
+                continue
             try:
-                vid = int(r["vector_id"])
+                vid = int(raw)
             except Exception:
                 continue
             if 0 <= vid < max_size:
                 out.append((vid, int(r["id"])))
         return out
 
+    def list_candidate_vector_ids(self, tag: str | None = None) -> list[tuple[int, int]]:
+        return self._list_vector_ids("vector_id", tag)
+
     def list_caption_vector_ids(self, tag: str | None = None) -> list[tuple[int, int]]:
-        sql = "SELECT id, caption_vector_id FROM memes WHERE disabled = 0"
-        params: list[Any] = []
-        if tag:
-            sql += " AND tag = ?"
-            params.append(tag)
-        with self._conn() as c:
-            rows = c.execute(sql, params).fetchall()
-        max_size = self.index_size
-        out: list[tuple[int, int]] = []
-        for r in rows:
-            try:
-                cvid = int(r["caption_vector_id"]) if r["caption_vector_id"] is not None else -1
-            except Exception:
-                continue
-            if 0 <= cvid < max_size:
-                out.append((cvid, int(r["id"])))
-        return out
+        return self._list_vector_ids("caption_vector_id", tag)
 
     def count_by_tag(self) -> dict[str, int]:
         with self._conn() as c:

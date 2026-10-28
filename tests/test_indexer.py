@@ -1,6 +1,5 @@
 from pathlib import Path
 
-import pytest
 from PIL import Image
 
 from core.database import MemeDatabase

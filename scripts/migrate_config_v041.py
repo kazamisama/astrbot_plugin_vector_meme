@@ -1,4 +1,4 @@
-﻿# -*- coding: utf-8 -*-
+# -*- coding: utf-8 -*-
 """迁移 0.4.0 -> 0.4.1：平铺配置 -> 分组配置。
 
 0.4.1 将 _conf_schema.json 改为顶层 object 分组（参考 engram 插件）。
@@ -13,7 +13,6 @@ from __future__ import annotations
 
 import json
 import os
-import sys
 from pathlib import Path
 
 PLUGIN_DIR = Path(__file__).resolve().parent.parent

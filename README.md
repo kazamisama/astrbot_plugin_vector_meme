@@ -1,6 +1,6 @@
 # astrbot_plugin_vector_meme
 
-基于向量检索的 AstrBot 智能表情包插件，当前版本 **0.7.4**。
+基于向量检索的 AstrBot 智能表情包插件，当前版本 **0.8.1**。
 
 插件用 CLIP/OpenCLIP 把表情图片编码为向量。LLM 只需要在回复里输出情绪/场景占位符（`%%happy%%`）或配合 XML 结构化输出插件输出 `<sticker>happy</sticker>` 标记，具体发送哪张图由向量相似度、标签权重、反重复策略和随机采样共同决定。
 
@@ -168,6 +168,7 @@ python scripts/copy_meme_manager_library.py
 | `/vm caption [limit]` 🔒 | 为无 caption 的表情批量生成视觉语义描述，自动复用 `captions.json` |
 | `/vm caption 导出` 🔒 | 把 DB 中的 caption 导出到 `memes/captions.json` |
 | `/vm 删除 <id>` 🔒 | 从索引移除某条记录 |
+| `/vm 去重 [preview/apply/undo] [阈值]` 🔒 | 检测近重复表情变体（默认 preview）；apply 时每组保留 1 张、其余禁用，undo 可恢复 |
 | `/vm 刷新提示` | 重新注入表情标签 prompt 到全局人格 |
 | `/vm 帮助` | 显示命令列表 |
 
@@ -310,7 +311,6 @@ astrbot_plugin_vector_meme/
 │   ├── migrate_config_v041.py
 │   └── test_openclip_load.py
 ├── tests/                  # pytest 核心测试（dev-only）
-├── utils/
 └── memes/                  # 内置图库，子目录名即 tag
 ```
 
@@ -353,7 +353,7 @@ python -m pytest tests -q
 常用检查：
 
 ```bash
-python -m py_compile main.py core/*.py utils/*.py tests/*.py
+python -m py_compile main.py core/*.py tests/*.py
 ```
 
 离线建索引（不启动 AstrBot）：

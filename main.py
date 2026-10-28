@@ -16,6 +16,7 @@ import re
 import shutil
 import uuid
 from pathlib import Path
+from typing import Any, Awaitable, Callable
 
 import numpy as np
 
@@ -480,35 +481,39 @@ class VectorMemePlugin(Star):
             return None
         return self._retriever, self._indexer, self._db
 
-    async def _ensure_ready_with_heartbeat(
-        self, event: AstrMessageEvent, action: str
-    ) -> tuple[MemeRetriever, MemeIndexer, MemeDatabase] | None:
-        """冷启动加载 embedder 时向用户发送心跳，避免长时间无反馈。"""
-        if self._embedder is not None and self._retriever is not None:
-            return await self._ensure_ready()
+    async def _send_via_event(self, event: AstrMessageEvent, text: str) -> None:
+        """通过 per-event API 发后台提示；失败只记日志，不影响主流程。"""
         from astrbot.core.message.message_event_result import MessageEventResult
 
-        async def _send(text):
-            try:
-                await event.send(MessageEventResult().message(text))
-            except Exception as e:
-                logger.warning(f"[{PLUGIN_NAME}] 后台发消息失败: {e}")
+        try:
+            await event.send(MessageEventResult().message(text))
+        except Exception as e:
+            logger.warning(f"[{PLUGIN_NAME}] 后台发消息失败: {e}")
 
+    async def _with_embedder_heartbeat(
+        self,
+        event: AstrMessageEvent,
+        loader: Callable[[], Awaitable[Any]],
+        *,
+        start_text: str,
+        tick_text: Callable[[int], str],
+    ) -> Any:
+        """等待 embedder 加载（可能下载模型）期间定时发心跳，避免长时间无反馈。"""
         done = asyncio.Event()
 
         async def _heartbeat():
             t = 0
-            await _send(f"⏳ 正在加载 embedder（{action}）...")
+            await self._send_via_event(event, start_text)
             while not done.is_set():
                 await asyncio.sleep(5)
                 t += 5
                 if done.is_set():
                     break
-                await _send(f"⏳ 仍在加载 embedder... ({t}s)")
+                await self._send_via_event(event, tick_text(t))
 
         task = asyncio.create_task(_heartbeat())
         try:
-            return await self._ensure_ready()
+            return await loader()
         finally:
             done.set()
             try:
@@ -516,7 +521,20 @@ class VectorMemePlugin(Star):
             except asyncio.TimeoutError:
                 task.cancel()
 
-    # ---------- 路径与自动索引 ----------
+    async def _ensure_ready_with_heartbeat(
+        self, event: AstrMessageEvent, action: str
+    ) -> tuple[MemeRetriever, MemeIndexer, MemeDatabase] | None:
+        """冷启动加载 embedder 时向用户发送心跳，避免长时间无反馈。"""
+        if self._embedder is not None and self._retriever is not None:
+            return await self._ensure_ready()
+        return await self._with_embedder_heartbeat(
+            event,
+            self._ensure_ready,
+            start_text=f"⏳ 正在加载 embedder（{action}）...",
+            tick_text=lambda t: f"⏳ 仍在加载 embedder... ({t}s)",
+        )
+
+    # ---------- 路径与权限 ----------
 
     @property
     def meme_dir(self) -> Path:
@@ -526,20 +544,6 @@ class VectorMemePlugin(Star):
         # 留空：使用插件自带的 memes/ 目录
         plugin_root = Path(__file__).resolve().parent
         return plugin_root / "memes"
-
-    async def _auto_index(self):
-        """保留自动索引方法，但不挂启动钩子，避免 AstrBot 版本差异。"""
-        ready = await self._ensure_ready()
-        if not ready:
-            return
-        _, indexer, _ = ready
-        async with self._mutation_lock:
-            await asyncio.to_thread(
-                lambda: indexer.index_directory(self.meme_dir)
-            )
-        # 标签列表可能已变化，重新注入
-        self._inject_into_personas()
-        logger.info(f"[{PLUGIN_NAME}] 自动索引完成")
 
     @staticmethod
     def _event_is_admin(event: AstrMessageEvent) -> bool:
@@ -660,39 +664,17 @@ class VectorMemePlugin(Star):
                 f"embedder 已就绪（{self._backend_name}）"
             )
             return
-        from astrbot.core.message.message_event_result import MessageEventResult
-
-        async def _send(text):
-            try:
-                await event.send(MessageEventResult().message(text))
-            except Exception as e:
-                logger.warning(f"[{PLUGIN_NAME}] 后台发消息失败: {e}")
-
-        done = asyncio.Event()
-
-        async def _heartbeat():
-            t = 0
-            await _send(f"⏳ 预热 {self._backend_name} 启动...")
-            while not done.is_set():
-                await asyncio.sleep(5)
-                t += 5
-                if done.is_set():
-                    break
-                await _send(f"⏳ 预热 {self._backend_name} 仍进行中... ({t}s)")
-
-        hb_task = asyncio.create_task(_heartbeat())
         try:
-            await self._ensure_embedder()
+            await self._with_embedder_heartbeat(
+                event,
+                self._ensure_embedder,
+                start_text=f"⏳ 预热 {self._backend_name} 启动...",
+                tick_text=lambda t: f"⏳ 预热 {self._backend_name} 仍进行中... ({t}s)",
+            )
         except Exception as e:
             logger.exception("embedder 预热失败")
             yield event.plain_result(f"❌ embedder 预热失败: {e}")
             return
-        finally:
-            done.set()
-            try:
-                await asyncio.wait_for(hb_task, timeout=3.0)
-            except asyncio.TimeoutError:
-                hb_task.cancel()
         yield event.plain_result(
             f"✅ embedder 就绪：{self._backend_name} (dim={self._embedder.dim})"
         )
@@ -745,33 +727,12 @@ class VectorMemePlugin(Star):
         )
 
         # 心跳：embedder 加载阶段（可能下载模型，可能拉很久）
-        embedder_done = asyncio.Event()
-        from astrbot.core.message.message_event_result import MessageEventResult
-
-        async def _send(text):
-            try:
-                await event.send(MessageEventResult().message(text))
-            except Exception as e:
-                logger.warning(f"[{PLUGIN_NAME}] 后台发消息失败: {e}")
-
-        async def _embedder_heartbeat():
-            t = 0
-            await _send("⏳ 正在加载 embedder...")
-            while not embedder_done.is_set():
-                await asyncio.sleep(5)
-                t += 5
-                if embedder_done.is_set():
-                    break
-                await _send(f"⏳ 仍在加载 embedder... ({t}s)")
-        heartbeat_task = asyncio.create_task(_embedder_heartbeat())
-        try:
-            ready = await self._ensure_ready()
-        finally:
-            embedder_done.set()
-            try:
-                await asyncio.wait_for(heartbeat_task, timeout=3.0)
-            except asyncio.TimeoutError:
-                heartbeat_task.cancel()
+        ready = await self._with_embedder_heartbeat(
+            event,
+            self._ensure_ready,
+            start_text="⏳ 正在加载 embedder...",
+            tick_text=lambda t: f"⏳ 仍在加载 embedder... ({t}s)",
+        )
         if not ready:
             yield event.plain_result("embedder 未就绪")
             return
@@ -791,14 +752,6 @@ class VectorMemePlugin(Star):
             logger.info(f"[index] {done}/{total} {fp}")
             loop.call_soon_threadsafe(_queue_progress, done, total, str(fp))
 
-        from astrbot.core.message.message_event_result import MessageEventResult
-
-        async def _send_progress(text):
-            try:
-                await event.send(MessageEventResult().message(text))
-            except Exception as e:
-                logger.warning(f"[{PLUGIN_NAME}] progress send failed: {e}")
-
         async def _progress_reporter():
             last_done = -10
             while True:
@@ -811,8 +764,8 @@ class VectorMemePlugin(Star):
                 if done - last_done < 10 and done != total:
                     continue
                 last_done = done
-                await _send_progress(
-                    f"⏳ 索引进度: {done}/{total}\n最近: {Path(fp).name}"
+                await self._send_via_event(
+                    event, f"⏳ 索引进度: {done}/{total}\n最近: {Path(fp).name}"
                 )
                 if done >= total:
                     break
@@ -914,40 +867,19 @@ class VectorMemePlugin(Star):
                 backup_hint = ", ".join(str(bak) for _, bak, _ in backup_paths if bak.exists()) or "无"
 
                 # 2. 只加载 embedder，不修改/不删除现有库。
-                embedder_done = asyncio.Event()
-                from astrbot.core.message.message_event_result import MessageEventResult
-
-                async def _send(text):
-                    try:
-                        await event.send(MessageEventResult().message(text))
-                    except Exception as e:
-                        logger.warning(f"[{PLUGIN_NAME}] 后台发消息失败: {e}")
-
-                async def _embedder_heartbeat():
-                    t = 0
-                    await _send("⏳ 正在加载 embedder...")
-                    while not embedder_done.is_set():
-                        await asyncio.sleep(5)
-                        t += 5
-                        if embedder_done.is_set():
-                            break
-                        await _send(f"⏳ 仍在加载 embedder... ({t}s)")
-
-                heartbeat_task = asyncio.create_task(_embedder_heartbeat())
                 try:
-                    await self._ensure_embedder(prepare_library=False)
+                    await self._with_embedder_heartbeat(
+                        event,
+                        lambda: self._ensure_embedder(prepare_library=False),
+                        start_text="⏳ 正在加载 embedder...",
+                        tick_text=lambda t: f"⏳ 仍在加载 embedder... ({t}s)",
+                    )
                 except Exception:
                     logger.exception(f"[{PLUGIN_NAME}] 重建：embedder 加载失败")
                     yield event.plain_result(
                         f"embedder 加载失败，已保留原库。备份: {backup_hint}"
                     )
                     return
-                finally:
-                    embedder_done.set()
-                    try:
-                        await asyncio.wait_for(heartbeat_task, timeout=3.0)
-                    except asyncio.TimeoutError:
-                        heartbeat_task.cancel()
 
                 # 3. 在临时目录构建完整新库，成功后原地替换内存索引。
                 progress_q: asyncio.Queue = asyncio.Queue(maxsize=64)
@@ -963,12 +895,6 @@ class VectorMemePlugin(Star):
                     logger.info(f"[rebuild] {done}/{total} {fp}")
                     loop.call_soon_threadsafe(_queue_progress, done, total, str(fp))
 
-                async def _send_progress(text):
-                    try:
-                        await event.send(MessageEventResult().message(text))
-                    except Exception as e:
-                        logger.warning(f"[{PLUGIN_NAME}] progress send failed: {e}")
-
                 async def _progress_reporter():
                     last_done = -10
                     while True:
@@ -983,8 +909,9 @@ class VectorMemePlugin(Star):
                         if done - last_done < 10 and done != total:
                             continue
                         last_done = done
-                        await _send_progress(
-                            f"⏳ 重建进度: {done}/{total}\n最近: {Path(fp).name}"
+                        await self._send_via_event(
+                            event,
+                            f"⏳ 重建进度: {done}/{total}\n最近: {Path(fp).name}",
                         )
                         if done >= total:
                             break

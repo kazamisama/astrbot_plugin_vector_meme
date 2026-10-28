@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import time
 import traceback
-from pathlib import Path
 
 print("[test_openclip] start", flush=True)
 try:

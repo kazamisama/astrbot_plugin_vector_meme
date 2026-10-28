@@ -1,5 +1,4 @@
 import numpy as np
-import pytest
 
 from core.database import MemeDatabase
 from core.dedup import DEDUP_TAG_PREFIX, apply_dedup, cluster_near_duplicates, undo_dedup

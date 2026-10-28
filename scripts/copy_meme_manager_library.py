@@ -10,7 +10,6 @@ from __future__ import annotations
 
 import argparse
 import shutil
-import sys
 from pathlib import Path
 
 DEFAULT_SOURCE = Path(r"C:\Users\chiriu\.astrbot\data\plugins\meme_manager\memes")
