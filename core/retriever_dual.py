@@ -51,21 +51,7 @@ class DualRetriever(MemeRetriever):
         topk: int,
     ) -> dict[int, float]:
         """Search caption vectors, return {meme_id: cosine_similarity}."""
-        if not candidates:
-            return {}
-        cap_ids = np.array([c[0] for c in candidates], dtype=np.int64)
-        cvid_to_mid = {int(v): m for v, m in zip(cap_ids.tolist(), [c[1] for c in candidates])}
-        q = query_vector.reshape(1, -1).astype('float32')
-        search_k = min(max(int(topk), self.candidate_pool_size), len(candidates))
-        sims, found = self.db.search_index(q, search_k, ids=cap_ids)
-        out: dict[int, float] = {}
-        for sim, vid in zip(sims, found):
-            if int(vid) < 0:
-                continue
-            mid = cvid_to_mid.get(int(vid))
-            if mid is not None:
-                out[mid] = float(sim)
-        return out
+        return dict(self._search_meme_scores(query_vector, candidates, topk))
 
     def _caption_hits(
         self,
@@ -75,34 +61,10 @@ class DualRetriever(MemeRetriever):
     ) -> list:
         """纯 caption 路（api 后端）：按 caption 分数构造 MemeHit 列表。"""
         order = sorted(cap_scores, key=cap_scores.get, reverse=True)[:max(int(topk), 0)]
-        if not order:
-            return []
-        with self.db._conn() as c:  # noqa: SLF001
-            placeholders = ",".join("?" * len(order))
-            rows = c.execute(
-                f"SELECT id, file_path, tag, usage_count, last_used_at, description "
-                f"FROM memes WHERE id IN ({placeholders})",
-                list(order),
-            ).fetchall()
-            meme_rows = {int(r["id"]): dict(r) for r in rows}
-        hits = []
-        for mid in order:
-            row = meme_rows.get(mid)
-            if row is None:
-                continue
-            raw = float(cap_scores[mid])
-            hits.append(MemeHit(
-                meme_id=mid,
-                file_path=row["file_path"],
-                tag=row["tag"],
-                similarity=raw,
-                raw_similarity=raw,
-                usage_count=row.get("usage_count", 0) or 0,
-                last_used_at=row.get("last_used_at"),
-                description=row.get("description"),
-                fallback_used=fallback_used,
-            ))
-        return hits
+        scores = [(mid, float(cap_scores[mid])) for mid in order]
+        return self._build_hits(
+            scores, self._load_meme_rows(order), fallback_used=fallback_used
+        )
 
     @staticmethod
     def _minmax(scores: dict[int, float]) -> dict[int, float]:
@@ -154,30 +116,20 @@ class DualRetriever(MemeRetriever):
 
         expanded_tags: list[str] = list(base.expanded_tags or [])
 
-        cap_candidates = self._caption_candidates(tag)
-        cap_fallback = False
-        if not cap_candidates and fallback_to_all_tags:
-            cap_candidates = self._caption_candidates(None)
-            cap_fallback = True
+        # caption 候选同样走 tag 过滤 -> 回退全库 -> 小池扩展（与图片路径共享实现）
+        cap_candidates, cap_fallback, cap_expanded = self._resolve_candidates(
+            tag,
+            self.db.list_caption_vector_ids,
+            query_vector,
+            fallback_to_all_tags=fallback_to_all_tags,
+            rerank=True,
+            expand_pool=expand_pool,
+        )
+        for t in cap_expanded or []:
+            if t not in expanded_tags:
+                expanded_tags.append(t)
         if not cap_candidates:
             return base
-
-        # caption 候选同样做小池扩展（与图片路径共享 related-tag 原型）
-        use_expand = self.expand_small_pool if expand_pool is None else bool(expand_pool)
-        if (
-            use_expand
-            and not cap_fallback
-            and tag
-            and cap_candidates
-            and len(cap_candidates) < self.candidate_pool_size
-        ):
-            cap_candidates, extra_tags = self._expand_candidates(
-                query_vector, tag, cap_candidates, self.db.list_caption_vector_ids
-            )
-            if extra_tags:
-                for t in extra_tags:
-                    if t not in expanded_tags:
-                        expanded_tags.append(t)
 
         cap_scores = self._search_caption_path(query_vector, cap_candidates, internal_topk)
         if not cap_scores:
@@ -204,14 +156,7 @@ class DualRetriever(MemeRetriever):
                 base.hits = caption_hits[:max(int(topk), 0)]
             base.used_fallback = cap_fallback
             base.expanded_tags = expanded_tags or None
-            if base.hits:
-                self.db.log_search(
-                    query_text=text,
-                    tag_filter=base.original_tag,
-                    topk_ids=[h.meme_id for h in base.hits],
-                    selected_id=base.hits[0].meme_id,
-                    similarity=base.hits[0].similarity,
-                )
+            self._log_search(text, base.original_tag, base.hits)
             return base
 
         w_cap = self.caption_weight

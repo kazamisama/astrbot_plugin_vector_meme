@@ -115,27 +115,107 @@ class MemeRetriever:
         """返回 [(vector_id, meme_id)]，自动过滤越界或无效 vector_id。"""
         return self.db.list_candidate_vector_ids(tag=tag)
 
-    def _all_active_vectors(self, exclude_meme_id: int | None = None) -> tuple[list[dict], np.ndarray]:
-        rows = []
-        vecs = []
-        if self.db.index_size <= 0:
-            return rows, np.empty((0, self.db.dim), dtype="float32")
-        all_vecs = self.db.reconstruct_all()
-        for row in self.db.list_memes(limit=10_000_000):
-            if exclude_meme_id is not None and int(row["id"]) == int(exclude_meme_id):
+    def _search_meme_scores(
+        self,
+        query_vector: np.ndarray,
+        candidates: list[tuple[int, int]],
+        topk: int,
+    ) -> list[tuple[int, float]]:
+        """在候选块内做一次 FAISS 检索，返回按相似度降序的 [(meme_id, sim)]。
+
+        图片路径与 caption 路径共用：candidates 决定候选块，返回前过滤未命中的
+        vector_id，调用方只关心 meme_id。
+        """
+        if not candidates or self.db.index_size <= 0:
+            return []
+        vec_ids = np.array([c[0] for c in candidates], dtype=np.int64)
+        q = np.asarray(query_vector, dtype="float32").reshape(1, -1)
+        search_k = min(max(int(topk), self.candidate_pool_size), len(candidates))
+        sims, found_vids = self.db.search_index(q, search_k, ids=vec_ids)
+        vid_to_mid = {int(vid): mid for vid, mid in candidates}
+        scored: list[tuple[int, float]] = []
+        for vid, sim in zip(found_vids, sims):
+            mid = vid_to_mid.get(int(vid))
+            if mid is not None:
+                scored.append((mid, float(sim)))
+        return scored
+
+    def _load_meme_rows(self, meme_ids: list[int]) -> dict[int, dict]:
+        """按 meme_id 批量加载展示/重排需要的列。"""
+        if not meme_ids:
+            return {}
+        with self.db._conn() as c:  # noqa: SLF001
+            placeholders = ",".join("?" * len(meme_ids))
+            rows = c.execute(
+                f"SELECT id, file_path, tag, usage_count, last_used_at, description "
+                f"FROM memes WHERE id IN ({placeholders})",
+                list(meme_ids),
+            ).fetchall()
+        return {int(r["id"]): dict(r) for r in rows}
+
+    @staticmethod
+    def _build_hits(
+        scores: list[tuple[int, float]],
+        rows: dict[int, dict],
+        *,
+        fallback_used: bool = False,
+    ) -> list[MemeHit]:
+        """把 (meme_id, similarity) 序列与 meme 行拼成 MemeHit 列表。"""
+        hits: list[MemeHit] = []
+        for mid, sim in scores:
+            row = rows.get(mid)
+            if row is None:
                 continue
-            try:
-                vid = int(row["vector_id"])
-            except Exception:
-                continue
-            if 0 <= vid < self.db.index_size:
-                rows.append(row)
-                vecs.append(all_vecs[vid])
-        if not vecs:
-            return rows, np.empty((0, self.db.dim), dtype="float32")
-        arr = np.stack(vecs, axis=0).astype("float32")
-        norm = np.linalg.norm(arr, axis=1, keepdims=True) + 1e-9
-        return rows, arr / norm
+            hits.append(MemeHit(
+                meme_id=mid,
+                file_path=row["file_path"],
+                tag=row["tag"],
+                similarity=sim,
+                raw_similarity=sim,
+                usage_count=row.get("usage_count", 0) or 0,
+                last_used_at=row.get("last_used_at"),
+                description=row.get("description"),
+                fallback_used=fallback_used,
+            ))
+        return hits
+
+    def _resolve_candidates(
+        self,
+        tag: str | None,
+        fetch,
+        query_vector: np.ndarray,
+        *,
+        fallback_to_all_tags: bool,
+        rerank: bool,
+        expand_pool: bool | None = None,
+        allow_expansion: bool = True,
+    ) -> tuple[list[tuple[int, int]], bool, list[str] | None]:
+        """候选块解析：tag 过滤 -> 回退全库 -> 小池扩展，图片/caption 两路共用。"""
+        candidates = fetch(tag)
+        used_fallback = False
+        expanded_tags: list[str] | None = None
+        if not candidates and fallback_to_all_tags:
+            candidates = fetch(None)
+            used_fallback = True
+        elif rerank and allow_expansion and candidates and tag:
+            use_expand = self.expand_small_pool if expand_pool is None else bool(expand_pool)
+            if use_expand:
+                candidates, expanded_tags = self._expand_candidates(
+                    query_vector, tag, candidates, fetch
+                )
+        return candidates, used_fallback, expanded_tags
+
+    def _log_search(self, text: str, original_tag: str | None, hits: list[MemeHit]) -> None:
+        """检索日志只在一处写，图片路径与双路融合共用。"""
+        if not hits:
+            return
+        self.db.log_search(
+            query_text=text,
+            tag_filter=original_tag,
+            topk_ids=[h.meme_id for h in hits],
+            selected_id=hits[0].meme_id,
+            similarity=hits[0].similarity,
+        )
 
     def _related_tags(self, query_vector: np.ndarray, exclude_tag: str | None, topk: int) -> list[tuple[str, float]]:
         """按 tag prototype 与查询向量的相似度，返回最相关的 tag（排除 exclude_tag）。"""
@@ -146,7 +226,7 @@ class MemeRetriever:
         if qn <= 0:
             return []
         q = q / qn
-        rows, vecs = self._all_active_vectors(exclude_meme_id=None)
+        rows, vecs = self.db.active_vector_rows()
         if not rows or vecs.size == 0:
             return []
         tag_vecs: dict[str, list[np.ndarray]] = {}
@@ -347,28 +427,23 @@ class MemeRetriever:
         query_text = self._build_query(text, tag)
         qvec = query_vector if query_vector is not None else self.embedder.embed_text(query_text)
 
-        candidates = self._candidate_vector_ids(tag)
-        used_fallback = False
         original_tag = tag
-        expanded_tags: list[str] | None = None
-        if not candidates and fallback_to_all_tags:
-            candidates = self._candidate_vector_ids(None)
-            used_fallback = True
+        candidates, used_fallback, expanded_tags = self._resolve_candidates(
+            tag,
+            self._candidate_vector_ids,
+            qvec,
+            fallback_to_all_tags=fallback_to_all_tags,
+            rerank=rerank,
+            expand_pool=expand_pool,
+        )
+        if used_fallback:
             tag = None
-        elif not rerank:
-            pass  # 确定性路径不扩展小池、不做 MMR
-        else:
-            use_expand = self.expand_small_pool if expand_pool is None else bool(expand_pool)
-            if use_expand and tag and candidates:
-                candidates, expanded_tags = self._expand_candidates(
-                    qvec, tag, candidates, self.db.list_candidate_vector_ids
-                )
-                if expanded_tags:
-                    logger.info(
-                        "tag=%s 候选不足，扩展相关 tag: %s",
-                        original_tag,
-                        ",".join(expanded_tags),
-                    )
+        if expanded_tags:
+            logger.info(
+                "tag=%s 候选不足，扩展相关 tag: %s",
+                original_tag,
+                ",".join(expanded_tags),
+            )
 
         if not candidates or self.db.index_size <= 0:
             return RetrievalResult(
@@ -380,55 +455,15 @@ class MemeRetriever:
                 pool_size=len(candidates) if candidates else None,
             )
 
-        vec_ids = np.array([c[0] for c in candidates], dtype=np.int64)
-
         # IDSelectorBatch 只做候选集结果过滤；IndexFlatIP 仍是全量扫描，
         # 但避免 reconstruct_n(全量) + 临时索引重建的额外开销。
-        q = qvec.reshape(1, -1).astype("float32")
-        search_k = min(max(int(topk), self.candidate_pool_size), len(candidates))
-        sims, found_vids = self.db.search_index(q, search_k, ids=vec_ids)
-
+        scored = self._search_meme_scores(qvec, candidates, topk)
         # 只加载 FAISS 命中的 meme 行：命中数 ≤ search_k，避免全量预取和超长 IN 子句
-        found_set = {int(v) for v in found_vids if int(v) >= 0}
-        vid_to_mid: dict[int, int] = {}
-        for vid, mid in candidates:
-            if int(vid) in found_set:
-                vid_to_mid[int(vid)] = mid
-        found_mids = list(vid_to_mid.values())
-        meme_rows: dict[int, dict] = {}
-        if found_mids:
-            with self.db._conn() as c:  # noqa: SLF001
-                placeholders = ",".join("?" * len(found_mids))
-                rows = c.execute(
-                    f"SELECT id, file_path, tag, usage_count, last_used_at, description "
-                    f"FROM memes WHERE id IN ({placeholders})",
-                    found_mids,
-                ).fetchall()
-                for r in rows:
-                    meme_rows[int(r["id"])] = dict(r)
-
-        hits: list[MemeHit] = []
-        for vid, sim in zip(found_vids, sims):
-            if int(vid) < 0:
-                continue
-            mid = vid_to_mid.get(int(vid))
-            if mid is None:
-                continue
-            row = meme_rows.get(mid)
-            if row is None:
-                continue
-            raw = float(sim)
-            hits.append(MemeHit(
-                meme_id=mid,
-                file_path=row["file_path"],
-                tag=row["tag"],
-                similarity=raw,
-                raw_similarity=raw,
-                usage_count=row.get("usage_count", 0) or 0,
-                last_used_at=row.get("last_used_at"),
-                description=row.get("description"),
-                fallback_used=used_fallback,
-            ))
+        hits = self._build_hits(
+            scored,
+            self._load_meme_rows([mid for mid, _ in scored]),
+            fallback_used=used_fallback,
+        )
 
         vectors: dict[int, np.ndarray] | None = None
         if rerank and self.diversity_enabled and hits:
@@ -464,14 +499,7 @@ class MemeRetriever:
         if used_fallback:
             result.query_text += f" [fallback: no memes in tag '{original_tag}']"
 
-        if hits:
-            self.db.log_search(
-                query_text=text,
-                tag_filter=original_tag,
-                topk_ids=[h.meme_id for h in hits],
-                selected_id=hits[0].meme_id,
-                similarity=hits[0].similarity,
-            )
+        self._log_search(text, original_tag, hits)
         return result
 
     # ---------- 采样 ----------
@@ -579,7 +607,7 @@ class MemeRetriever:
         prototype_min_samples: int = 2,
     ) -> list[dict]:
         """基于 tag prototype + KNN 对图片向量分类。"""
-        rows, vecs = self._all_active_vectors(exclude_meme_id=exclude_meme_id)
+        rows, vecs = self.db.active_vector_rows(exclude_meme_id=exclude_meme_id)
         if not rows or vecs.size == 0:
             return []
 

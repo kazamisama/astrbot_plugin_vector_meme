@@ -9,8 +9,6 @@ from __future__ import annotations
 
 import asyncio
 
-import numpy as np
-
 
 # ---------- 公共构造 ----------
 

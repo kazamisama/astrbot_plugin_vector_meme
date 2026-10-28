@@ -289,6 +289,35 @@ class MemeDatabase:
         with self._lock:
             return self._index.reconstruct_n(0, self._index.ntotal)
 
+    def active_vector_rows(
+        self, exclude_meme_id: int | None = None
+    ) -> tuple[list[dict], np.ndarray]:
+        """返回 (rows, normalized_vectors)，仅含 vector_id 落在索引内的行。
+
+        tag prototype、KNN 分类与近重复聚类都要这份"启用行 + 归一化向量"，
+        放在 DB 层避免三处各拼一遍 SQL/FAISS 映射。
+        """
+        rows: list[dict] = []
+        vecs = []
+        if self.index_size <= 0:
+            return rows, np.empty((0, self.dim), dtype="float32")
+        all_vecs = self.reconstruct_all()
+        for row in self.list_memes(limit=10_000_000):
+            if exclude_meme_id is not None and int(row["id"]) == int(exclude_meme_id):
+                continue
+            try:
+                vid = int(row["vector_id"])
+            except Exception:
+                continue
+            if 0 <= vid < self.index_size:
+                rows.append(row)
+                vecs.append(all_vecs[vid])
+        if not vecs:
+            return rows, np.empty((0, self.dim), dtype="float32")
+        arr = np.stack(vecs, axis=0).astype("float32")
+        arr /= np.linalg.norm(arr, axis=1, keepdims=True) + 1e-9
+        return rows, arr
+
     # ---------- Memes CRUD ----------
 
     def upsert_meme(

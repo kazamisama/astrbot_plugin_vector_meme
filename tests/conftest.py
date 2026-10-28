@@ -22,7 +22,6 @@ def tmp_path():
     沙箱环境里 tempfile.mkdtemp(0o700) / 系统 temp 目录的枚举与清理会触发
     权限错误，这里改成工作区内 os.mkdir + uuid，可写可清理。
     """
-    import os
     import uuid
 
     scratch = ROOT / "_ptest2"

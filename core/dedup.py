@@ -14,8 +14,6 @@ import logging
 import time
 from dataclasses import dataclass, field
 
-import numpy as np
-
 from .database import MemeDatabase
 
 logger = logging.getLogger(__name__)
@@ -41,28 +39,6 @@ class DupGroup:
         return [int(m["id"]) for m in self.members if int(m["id"]) != int(self.rep_id)]
 
 
-def _active_vector_rows(db: MemeDatabase) -> tuple[list[dict], np.ndarray]:
-    """返回 (rows, normalized_vectors)，仅含有效 vector_id 的启用行。"""
-    rows = []
-    vecs = []
-    if db.index_size <= 0:
-        return rows, np.empty((0, db.dim), dtype="float32")
-    all_vecs = db.reconstruct_all()
-    for r in db.list_memes(limit=10_000_000):
-        try:
-            vid = int(r["vector_id"])
-        except Exception:
-            continue
-        if 0 <= vid < db.index_size:
-            rows.append(r)
-            vecs.append(all_vecs[vid])
-    if not vecs:
-        return rows, np.empty((0, db.dim), dtype="float32")
-    arr = np.stack(vecs, axis=0).astype("float32")
-    arr /= np.linalg.norm(arr, axis=1, keepdims=True) + 1e-9
-    return rows, arr
-
-
 def cluster_near_duplicates(
     db: MemeDatabase,
     threshold: float = 0.95,
@@ -70,7 +46,7 @@ def cluster_near_duplicates(
     max_groups: int = 200,
 ) -> list[DupGroup]:
     """返回近重复簇，每个簇至少 min_group 个成员；按代表图使用次数降序。"""
-    rows, vecs = _active_vector_rows(db)
+    rows, vecs = db.active_vector_rows()
     if len(rows) < 2 or vecs.size == 0:
         return []
     threshold = max(min(float(threshold), 1.0), 0.0)
