@@ -1,5 +1,23 @@
 # 更新日志
 
+## [Unreleased]
+
+> 0.8.1 之后的维护改动，尚未发版；无用户可见的行为变更。
+
+### 变更
+- 清理死代码：删除未使用的 `utils/image_utils.py`、`MemeDatabase`/MemeHit/`_auto_index` 等无调用方实现
+- 抽出 `_send_via_event` / `_with_embedder_heartbeat`，命令实现不再各自复制心跳与发送逻辑
+- 命令清单与版本号收敛到单一来源：`core/command_spec.py` 驱动分发表/`/vm 帮助`/README/metadata，`core/version.py` 驱动版本号
+- 检索器去重：`MemeDatabase.active_vector_rows()` 与 `MemeRetriever` 的候选解析/打分/命中构造/检索日志被图片路与 caption 路共用
+
+### 新增
+- `tests/test_hooks.py`（LLM 钩子、外部取图入口）与 `tests/test_command_dispatch.py`（路由、权限门控）
+- CI（`.github/workflows/ci.yml`）：compileall + pytest + coverage 门禁 55% + 文档漂移检查
+- `LICENSE`（MIT）
+- `scripts/gen_command_docs.py`：从命令清单生成/校验 README 命令表与 metadata help
+- `scripts/diag_db.py`：只读运行库诊断（表结构、向量映射、per-tag 分布、最近检索日志）
+- `.gitattributes`：仓库统一 LF 行尾
+
 ## [0.8.1] - 2026-09-21
 
 ### 修复
