@@ -200,3 +200,27 @@ def test_rebuild_swap_failure_restores_backup(tmp_path, main_module, monkeypatch
     assert old_db.total_count() == before
     assert all(path.exists() for path in _backups(plugin))
     assert list(plugin.data_dir.glob("vector_meme_rebuild_*")) == []
+
+
+def test_progress_reporter_throttles_and_reports_completion(tmp_path, main_module):
+    plugin, _ = _make_plugin(tmp_path, main_module)
+
+    async def scenario():
+        event = FakeEvent()
+        async with plugin._progress_reporter(
+            event, log_tag="test", text_prefix="⏳ 测试进度"
+        ) as on_progress:
+            for count in range(1, 21):
+                on_progress(count, 20, tmp_path / f"{count}.png")
+            for _ in range(50):
+                if len(event.sent) >= 3:
+                    break
+                await asyncio.sleep(0.02)
+        return event
+
+    event = asyncio.run(scenario())
+    texts = [item["text"] for item in event.sent]
+    assert len(texts) == 3
+    assert "1/20" in texts[0]
+    assert "11/20" in texts[1]
+    assert "20/20" in texts[2]

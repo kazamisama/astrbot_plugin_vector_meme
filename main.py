@@ -17,7 +17,7 @@ import re
 import shutil
 import uuid
 from pathlib import Path
-from typing import Any, Awaitable, Callable
+from typing import Any, AsyncIterator, Awaitable, Callable
 
 import numpy as np
 
@@ -210,24 +210,15 @@ class VectorMemePlugin(Star):
         return "open_clip"
 
     def _has_embedding_provider(self) -> bool:
-        """尽力探测上下文里是否已有 Embedding 提供商；不加载 provider 本身。"""
+        """探测上下文里是否已有 Embedding 提供商；不加载 provider 本身。"""
         getter = getattr(self.context, "get_all_embedding_providers", None)
         if not callable(getter):
             return False
         try:
-            providers = getter()
+            return bool(getter())
         except Exception as exc:
             logger.debug(f"[{PLUGIN_NAME}] 探测 Embedding 提供商失败: {exc}")
             return False
-        if asyncio.iscoroutine(providers):
-            # 同步 __init__ 里无法 await：关闭协程并按“存在 provider”处理
-            providers.close()
-            return True
-        try:
-            return bool(providers)
-        except Exception as exc:
-            logger.debug(f"[{PLUGIN_NAME}] Embedding 提供商列表真值判断失败: {exc}")
-            return True
 
     def _backend_label(self) -> str:
         """状态展示用：auto 解析后显示 auto→实际后端。"""
@@ -594,6 +585,60 @@ class VectorMemePlugin(Star):
             except asyncio.TimeoutError:
                 task.cancel()
 
+    @contextlib.asynccontextmanager
+    async def _progress_reporter(
+        self,
+        event: AstrMessageEvent,
+        *,
+        log_tag: str,
+        text_prefix: str,
+    ) -> AsyncIterator[Callable[[int, int, Any], None]]:
+        """把后台线程的索引进度经队列节流后发给用户。"""
+        queue: asyncio.Queue = asyncio.Queue(maxsize=64)
+        loop = asyncio.get_running_loop()
+        done = asyncio.Event()
+
+        def _enqueue(done_count: int, total: int, fp: str) -> None:
+            try:
+                queue.put_nowait((done_count, total, fp))
+            except asyncio.QueueFull:
+                pass
+
+        def on_progress(done_count: int, total: int, fp) -> None:
+            logger.info(f"[{log_tag}] {done_count}/{total} {fp}")
+            loop.call_soon_threadsafe(_enqueue, done_count, total, str(fp))
+
+        async def _pump() -> None:
+            last_done = -10
+            while True:
+                try:
+                    done_count, total, fp = await asyncio.wait_for(
+                        queue.get(), timeout=2.0
+                    )
+                except asyncio.TimeoutError:
+                    if done.is_set():
+                        break
+                    continue
+                if done_count - last_done < 10 and done_count != total:
+                    continue
+                last_done = done_count
+                await self._send_via_event(
+                    event,
+                    f"{text_prefix}: {done_count}/{total}\n最近: {Path(fp).name}",
+                )
+                if done_count >= total:
+                    break
+
+        task = asyncio.create_task(_pump())
+        try:
+            yield on_progress
+        finally:
+            done.set()
+            try:
+                await asyncio.wait_for(task, timeout=3.0)
+            except asyncio.TimeoutError:
+                task.cancel()
+
     async def _ensure_ready_with_heartbeat(
         self, event: AstrMessageEvent, action: str
     ) -> tuple[MemeRetriever, MemeIndexer, MemeDatabase] | None:
@@ -785,55 +830,17 @@ class VectorMemePlugin(Star):
             return
         _, indexer, _ = ready
 
-        progress_q: asyncio.Queue = asyncio.Queue(maxsize=64)
-
-        loop = asyncio.get_running_loop()
-
-        def _queue_progress(done, total, fp):
-            try:
-                progress_q.put_nowait((done, total, str(fp)))
-            except asyncio.QueueFull:
-                pass
-
-        def _on_progress(done, total, fp):
-            logger.info(f"[index] {done}/{total} {fp}")
-            loop.call_soon_threadsafe(_queue_progress, done, total, str(fp))
-
-        async def _progress_reporter():
-            last_done = -10
-            while True:
-                try:
-                    done, total, fp = await asyncio.wait_for(progress_q.get(), timeout=2.0)
-                except asyncio.TimeoutError:
-                    if reporter_done.is_set():
-                        break
-                    continue
-                if done - last_done < 10 and done != total:
-                    continue
-                last_done = done
-                await self._send_via_event(
-                    event, f"⏳ 索引进度: {done}/{total}\n最近: {Path(fp).name}"
-                )
-                if done >= total:
-                    break
-
-        reporter_done = asyncio.Event()
-        reporter_task = asyncio.create_task(_progress_reporter())
-        try:
+        async with self._progress_reporter(
+            event, log_tag="index", text_prefix="⏳ 索引进度"
+        ) as on_progress:
             async with self._mutation_lock:
                 progress = await asyncio.to_thread(
                     lambda: indexer.index_directory(
                         path,
-                        progress=IndexProgress(_on_progress),
+                        progress=IndexProgress(on_progress),
                         tag_root=self.meme_dir,
                     ),
                 )
-        finally:
-            reporter_done.set()
-            try:
-                await asyncio.wait_for(reporter_task, timeout=3.0)
-            except asyncio.TimeoutError:
-                reporter_task.cancel()
         # 索引完成 → 标签列表可能变化 → 重新注入 prompt
         async with self._mutation_lock:
             self._inject_into_personas()
@@ -874,6 +881,39 @@ class VectorMemePlugin(Star):
                 backup.unlink(missing_ok=True)
             except Exception as e:
                 logger.warning(f"[{PLUGIN_NAME}] remove backup failed {backup}: {e}")
+
+    def _swap_rebuilt_db(
+        self,
+        old_db: MemeDatabase,
+        tmp_db: MemeDatabase,
+        backup_paths: list[tuple[Path, Path, bool]],
+    ) -> None:
+        """把临时库替换到正式路径；替换失败先还原备份再抛出。"""
+        with old_db._lock:
+            try:
+                os.replace(tmp_db.db_path, old_db.db_path)
+                os.replace(tmp_db.index_path, old_db.index_path)
+            except Exception:
+                restore_errors = self._restore_backup_files(backup_paths)
+                if restore_errors:
+                    logger.error(f"[{PLUGIN_NAME}] 还原备份失败: {restore_errors}")
+                raise
+            old_db.replace_index_in_place(tmp_db._index, self._embedder.dim)
+
+    def _restore_failed_rebuild(
+        self,
+        old_db: MemeDatabase,
+        old_dim: int,
+        backup_paths: list[tuple[Path, Path, bool]],
+    ) -> None:
+        """重建失败后的回档；失败只记录，不掩盖原始异常。"""
+        try:
+            with old_db._lock:
+                self._restore_backup_files(backup_paths)
+                old_db.dim = old_dim
+                old_db.reload_index()
+        except Exception:
+            logger.exception(f"[{PLUGIN_NAME}] 重建失败后的回滚未完全成功")
 
     async def _cmd_rebuild(self, event: AstrMessageEvent, rest: list[str]):
         path = self.meme_dir
@@ -929,42 +969,6 @@ class VectorMemePlugin(Star):
                     return
 
                 # 3. 在临时目录构建完整新库，成功后原地替换内存索引。
-                progress_q: asyncio.Queue = asyncio.Queue(maxsize=64)
-                loop = asyncio.get_running_loop()
-
-                def _queue_progress(done, total, fp):
-                    try:
-                        progress_q.put_nowait((done, total, str(fp)))
-                    except asyncio.QueueFull:
-                        pass
-
-                def _on_progress(done, total, fp):
-                    logger.info(f"[rebuild] {done}/{total} {fp}")
-                    loop.call_soon_threadsafe(_queue_progress, done, total, str(fp))
-
-                async def _progress_reporter():
-                    last_done = -10
-                    while True:
-                        try:
-                            done, total, fp = await asyncio.wait_for(
-                                progress_q.get(), timeout=2.0
-                            )
-                        except asyncio.TimeoutError:
-                            if reporter_done.is_set():
-                                break
-                            continue
-                        if done - last_done < 10 and done != total:
-                            continue
-                        last_done = done
-                        await self._send_via_event(
-                            event,
-                            f"⏳ 重建进度: {done}/{total}\n最近: {Path(fp).name}",
-                        )
-                        if done >= total:
-                            break
-
-                reporter_done = asyncio.Event()
-                reporter_task = asyncio.create_task(_progress_reporter())
                 # 不用 tempfile.mkdtemp：其 Windows 安全 ACL(0o700) 会让部分
                 # 受限环境/沙箱中 sqlite 无法在目录内建库；改为默认权限的
                 # 唯一目录，行为与 data_dir 下其他文件一致。
@@ -973,78 +977,59 @@ class VectorMemePlugin(Star):
                 tmp_db_path = tmp_dir / "memes.db"
                 tmp_index_path = tmp_dir / "memes.faiss"
                 try:
-                    tmp_db = MemeDatabase(
-                        tmp_db_path, tmp_index_path, dim=self._embedder.dim
-                    )
-                    tmp_indexer = self._make_indexer(tmp_db)
-                    progress = await asyncio.to_thread(
-                        lambda: tmp_indexer.index_directory(
-                            path, progress=IndexProgress(_on_progress)
+                    async with self._progress_reporter(
+                        event, log_tag="rebuild", text_prefix="⏳ 重建进度"
+                    ) as on_progress:
+                        tmp_db = MemeDatabase(
+                            tmp_db_path, tmp_index_path, dim=self._embedder.dim
                         )
-                    )
-                    # 保留 usage_count / last_used_at / disabled 以及检索/索引日志
-                    tmp_db.copy_runtime_state_from(old_db)
-
-                    if self.caption_enabled:
-                        captioner = self._ensure_captioner()
-                        external = self._load_external_captions()
-                        legacy_captions = self._collect_db_captions(old_db)
-                        merged_captions = {**legacy_captions, **external}
-                        if captioner.available() or merged_captions:
-                            await enrich_meme_captions(
-                                tmp_db,
-                                self._embedder,
-                                captioner,
-                                limit=int(self.config.get("caption_batch_limit", 500)),
-                                external_captions=merged_captions,
+                        tmp_indexer = self._make_indexer(tmp_db)
+                        progress = await asyncio.to_thread(
+                            lambda: tmp_indexer.index_directory(
+                                path, progress=IndexProgress(on_progress)
                             )
-                        else:
-                            logger.warning(
-                                f"[{PLUGIN_NAME}] vision caption enabled but provider unavailable during rebuild"
-                            )
+                        )
+                        # 保留 usage_count / last_used_at / disabled 以及检索/索引日志
+                        tmp_db.copy_runtime_state_from(old_db)
 
-                    self._sync_tag_registry(tmp_db)
-                    tmp_db.set_meta("embedder_fingerprint", self._embedder_fingerprint())
-                    # 空库也会写出空 FAISS 文件，保证下面 os.replace 成功
-                    tmp_db.save_index()
-
-                    with old_db._lock:
-                        swap_attempted = True
-                        try:
-                            os.replace(tmp_db_path, old_db.db_path)
-                            os.replace(tmp_index_path, old_db.index_path)
-                        except Exception:
-                            restore_errors = self._restore_backup_files(backup_paths)
-                            if restore_errors:
-                                logger.error(
-                                    f"[{PLUGIN_NAME}] 还原备份失败: {restore_errors}"
+                        if self.caption_enabled:
+                            captioner = self._ensure_captioner()
+                            external = self._load_external_captions()
+                            legacy_captions = self._collect_db_captions(old_db)
+                            merged_captions = {**legacy_captions, **external}
+                            if captioner.available() or merged_captions:
+                                await enrich_meme_captions(
+                                    tmp_db,
+                                    self._embedder,
+                                    captioner,
+                                    limit=int(self.config.get("caption_batch_limit", 500)),
+                                    external_captions=merged_captions,
                                 )
-                            raise
-                        old_db.replace_index_in_place(tmp_db._index, self._embedder.dim)
+                            else:
+                                logger.warning(
+                                    f"[{PLUGIN_NAME}] vision caption enabled but provider unavailable during rebuild"
+                                )
+
+                        self._sync_tag_registry(tmp_db)
+                        tmp_db.set_meta("embedder_fingerprint", self._embedder_fingerprint())
+                        # 空库也会写出空 FAISS 文件，保证下面 os.replace 成功
+                        tmp_db.save_index()
+
+                        swap_attempted = True
+                        self._swap_rebuilt_db(old_db, tmp_db, backup_paths)
                         swapped = True
 
-                    self._indexer = self._make_indexer(old_db)
-                    self._retriever = self._make_retriever(old_db)
-                    self._inject_into_personas()
-                    success = True
+                        self._indexer = self._make_indexer(old_db)
+                        self._retriever = self._make_retriever(old_db)
+                        self._inject_into_personas()
+                        success = True
                 finally:
-                    reporter_done.set()
-                    try:
-                        await asyncio.wait_for(reporter_task, timeout=3.0)
-                    except asyncio.TimeoutError:
-                        reporter_task.cancel()
                     shutil.rmtree(tmp_dir, ignore_errors=True)
         except Exception:
             logger.exception(f"[{PLUGIN_NAME}] rebuild failed; rolling back")
             if "old_db" in locals() and old_db is not None:
                 if swap_attempted or swapped:
-                    try:
-                        with old_db._lock:
-                            self._restore_backup_files(backup_paths)
-                            old_db.dim = old_dim
-                            old_db.reload_index()
-                    except Exception:
-                        logger.exception(f"[{PLUGIN_NAME}] 重建失败后的回滚未完全成功")
+                    self._restore_failed_rebuild(old_db, old_dim, backup_paths)
                 self._db = old_db
             if not embedder_was_loaded and self._embedder is not None:
                 try:

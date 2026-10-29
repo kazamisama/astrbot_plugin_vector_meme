@@ -124,16 +124,6 @@ def test_auto_tolerates_provider_getter_exception(tmp_path, main_module, monkeyp
     assert plugin._backend_name == "open_clip"
 
 
-def test_auto_handles_async_provider_getter(tmp_path, main_module, monkeypatch):
-    _patch_modules(main_module, monkeypatch, set())
-
-    async def async_getter():
-        return [object()]
-
-    plugin = _make_plugin(tmp_path, main_module, getter=async_getter)
-    assert plugin._backend_name == "api"
-
-
 def test_status_reports_auto_resolution(tmp_path, main_module, monkeypatch):
     _patch_modules(main_module, monkeypatch, set())
     plugin = _make_plugin(tmp_path, main_module, providers=[object()])
