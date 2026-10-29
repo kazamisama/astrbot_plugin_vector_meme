@@ -22,6 +22,10 @@ class FakeEvent:
     def plain_result(text: str):
         return ("plain", text)
 
+    @staticmethod
+    def chain_result(chain):
+        return ("chain", chain)
+
     def stop_event(self) -> None:
         self.stopped = True
 
@@ -64,7 +68,7 @@ def make_plugin(
             self.sent_messages.append((umo, chain))
 
     meme_dir = tmp_path / "memes"
-    meme_dir.mkdir(exist_ok=True)
+    meme_dir.mkdir(parents=True, exist_ok=True)
     values = {
         "data_dir": str(tmp_path / "data"),
         "meme_dir": str(meme_dir),

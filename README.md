@@ -373,11 +373,11 @@ pip install -r tests/requirements-dev.txt
 python -m pytest tests -q
 ```
 
-覆盖率与 CI 用同一条命令，门禁 55%：
+覆盖率与 CI 用同一条命令，门禁 80%：
 
 ```bash
 python -m coverage run --source=. --omit="tests/*,scripts/*,.venv/*,.venv-test/*,.cache/*" -m pytest tests -q
-python -m coverage report --fail-under=55
+python -m coverage report --fail-under=80
 ```
 
 命令表与版本号由 `core/command_spec.py` / `core/version.py` 生成，改完命令后运行：

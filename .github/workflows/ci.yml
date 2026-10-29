@@ -31,4 +31,4 @@ jobs:
       - name: Tests with coverage
         run: |
           python -m coverage run --source=. --omit="tests/*,scripts/*,.venv/*,.venv-test/*,.cache/*" -m pytest tests -q
-          python -m coverage report --fail-under=55
+          python -m coverage report --fail-under=80
