@@ -1,6 +1,6 @@
 # 更新日志
 
-## [Unreleased]
+## [0.8.4] - 2026-10-29
 
 ### 变更
 - `embedder_backend` 新增 `auto` 并设为默认：启动时按「torch + open_clip 可导入 → open_clip；否则有 AstrBot Embedding 提供商 → api；都没有 → 回退 open_clip 并给出安装提示」自动选择。轻量安装（requirements.txt）与本地模型安装（requirements-openclip.txt）都无需再改配置
