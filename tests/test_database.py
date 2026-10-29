@@ -59,6 +59,28 @@ def test_health_detects_bad_caption_vector_id(db):
     assert not h["ok"]
 
 
+def test_dirty_vector_ids_are_skipped_and_flagged(db):
+    vids = db.add_vectors(np.ones((2, 8), dtype="float32"))
+    bad_text = db.upsert_meme("a.png", "h1", "happy", int(vids[0]))
+    bad_null = db.upsert_meme("b.png", "h2", "happy", int(vids[1]))
+    with db._conn() as c:
+        c.execute("UPDATE memes SET vector_id = 'not-a-number' WHERE id = ?", (bad_text,))
+        c.execute(
+            "UPDATE memes SET vector_id = '', caption_vector_id = 'oops' WHERE id = ?",
+            (bad_null,),
+        )
+
+    rows, vecs = db.active_vector_rows()
+    assert rows == []
+    assert vecs.shape == (0, 8)
+    assert db.live_vector_count() == 0
+
+    h = db.health_check()
+    assert h["bad_vector_ids_count"] == 2
+    assert {item["id"] for item in h["bad_vector_ids"]} == {bad_text, bad_null}
+    assert h["bad_caption_vector_ids_count"] == 1
+
+
 def test_health_does_not_flag_missing_caption_as_bad(db):
     vids = db.add_vectors(np.ones((1, 8), dtype="float32"))
     db.upsert_meme("x.png", "h", "happy", int(vids[0]))

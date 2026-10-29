@@ -296,6 +296,27 @@ class MemeDatabase:
         with self._lock:
             return self._index.reconstruct_n(0, self._index.ntotal)
 
+    @staticmethod
+    def _parse_vector_id(raw: Any) -> int | None:
+        """DB 行里的 vector_id 转 int；NULL/非数字返回 None。"""
+        if raw is None:
+            return None
+        try:
+            return int(raw)
+        except (TypeError, ValueError):
+            return None
+
+    @staticmethod
+    def _parse_sub_tags(raw: Any) -> list:
+        """DB 行里的 sub_tags JSON 转列表；脏数据按空列表处理。"""
+        if not raw:
+            return []
+        try:
+            tags = json.loads(raw)
+        except (TypeError, ValueError):
+            return []
+        return tags if isinstance(tags, list) else []
+
     def active_vector_rows(
         self, exclude_meme_id: int | None = None
     ) -> tuple[list[dict], np.ndarray]:
@@ -312,12 +333,8 @@ class MemeDatabase:
         for row in self.list_memes(limit=10_000_000):
             if exclude_meme_id is not None and int(row["id"]) == int(exclude_meme_id):
                 continue
-            try:
-                vid = int(row["vector_id"])
-            except (TypeError, ValueError):
-                # 脏 vector_id（NULL/非数字）：跳过该行，不参与聚类
-                continue
-            if 0 <= vid < self.index_size:
+            vid = self._parse_vector_id(row["vector_id"])
+            if vid is not None and 0 <= vid < self.index_size:
                 rows.append(row)
                 vecs.append(all_vecs[vid])
         if not vecs:
@@ -527,15 +544,8 @@ class MemeDatabase:
         max_size = self.index_size
         out: list[tuple[int, int]] = []
         for r in rows:
-            raw = r[column]
-            if raw is None:
-                continue
-            try:
-                vid = int(raw)
-            except (TypeError, ValueError):
-                # 脏 vector_id（NULL/非数字）：跳过该行
-                continue
-            if 0 <= vid < max_size:
+            vid = self._parse_vector_id(r[column])
+            if vid is not None and 0 <= vid < max_size:
                 out.append((vid, int(r["id"])))
         return out
 
@@ -583,13 +593,7 @@ class MemeDatabase:
             row = c.execute("SELECT sub_tags FROM memes WHERE id = ?", (int(meme_id),)).fetchone()
             if row is None:
                 return
-            try:
-                tags = json.loads(row["sub_tags"] or "[]")
-                if not isinstance(tags, list):
-                    tags = []
-            except (TypeError, ValueError):
-                # sub_tags 脏数据：按空列表处理，不阻断本次写入
-                tags = []
+            tags = self._parse_sub_tags(row["sub_tags"])
             if subtag and subtag not in [str(t) for t in tags]:
                 tags.append(subtag)
             c.execute(
@@ -611,13 +615,7 @@ class MemeDatabase:
             if not row:
                 return False, None, None
             old_tag = row["tag"]
-            try:
-                sub_tags = json.loads(row["sub_tags"] or "[]")
-                if not isinstance(sub_tags, list):
-                    sub_tags = []
-            except (TypeError, ValueError):
-                # sub_tags 脏数据：按空列表处理
-                sub_tags = []
+            sub_tags = self._parse_sub_tags(row["sub_tags"])
             if keep_old_as_subtag and old_tag and old_tag != new_tag and old_tag not in sub_tags:
                 sub_tags.append(old_tag)
             c.execute(
@@ -739,11 +737,8 @@ class MemeDatabase:
         count = 0
         for r in rows:
             for col in ("vector_id", "caption_vector_id"):
-                try:
-                    vid = int(r[col]) if r[col] is not None else -1
-                except (TypeError, ValueError):
-                    vid = -1
-                if 0 <= vid < max_size:
+                vid = self._parse_vector_id(r[col])
+                if vid is not None and 0 <= vid < max_size:
                     count += 1
         return count
 
@@ -760,17 +755,11 @@ class MemeDatabase:
         image_rows: list[sqlite3.Row] = []
         caption_rows: list[sqlite3.Row] = []
         for r in rows:
-            try:
-                vid = int(r["vector_id"])
-            except (TypeError, ValueError):
-                vid = -1
-            if 0 <= vid < max_size:
+            vid = self._parse_vector_id(r["vector_id"])
+            if vid is not None and 0 <= vid < max_size:
                 image_rows.append(r)
-            try:
-                cvid = int(r["caption_vector_id"]) if r["caption_vector_id"] is not None else -1
-            except (TypeError, ValueError):
-                cvid = -1
-            if 0 <= cvid < max_size:
+            cvid = self._parse_vector_id(r["caption_vector_id"])
+            if cvid is not None and 0 <= cvid < max_size:
                 caption_rows.append(r)
 
         image_vectors: list[np.ndarray] = []
@@ -867,19 +856,14 @@ class MemeDatabase:
                 except ValueError:
                     # 不在 root 下：记为图库目录外的孤儿文件
                     orphan_outside_root.append({"id": r["id"], "file_path": r["file_path"]})
-            try:
-                vid = int(r["vector_id"])
-            except (TypeError, ValueError):
-                vid = -1
-            if vid < 0 or vid >= self.index_size:
+            vid = self._parse_vector_id(r["vector_id"])
+            if vid is None or vid < 0 or vid >= self.index_size:
                 bad_vector_ids.append({"id": r["id"], "vector_id": r["vector_id"]})
-            if r["caption_vector_id"] is not None:
-                try:
-                    cvid = int(r["caption_vector_id"])
-                except (TypeError, ValueError):
-                    cvid = -1
-                if cvid < 0 or cvid >= self.index_size:
-                    bad_caption_vector_ids.append({"id": r["id"], "caption_vector_id": r["caption_vector_id"]})
+            raw_cvid = r["caption_vector_id"]
+            if raw_cvid is not None:
+                cvid = self._parse_vector_id(raw_cvid)
+                if cvid is None or cvid < 0 or cvid >= self.index_size:
+                    bad_caption_vector_ids.append({"id": r["id"], "caption_vector_id": raw_cvid})
         duplicate_hashes = [{"file_hash": r["file_hash"], "count": r["n"]} for r in duplicate_hash_rows]
         unregistered_tags = sorted(t for t in used_tags if t not in known_tags)
         index_mismatch = self.index_size < len(active)
@@ -887,11 +871,8 @@ class MemeDatabase:
         live_vectors = 0
         for r in rows:
             for col in ("vector_id", "caption_vector_id"):
-                try:
-                    vid = int(r[col]) if r[col] is not None else -1
-                except (TypeError, ValueError):
-                    vid = -1
-                if 0 <= vid < max_size:
+                vid = self._parse_vector_id(r[col])
+                if vid is not None and 0 <= vid < max_size:
                     live_vectors += 1
         orphan_vector_count = max(max_size - live_vectors, 0)
         ok = not (
