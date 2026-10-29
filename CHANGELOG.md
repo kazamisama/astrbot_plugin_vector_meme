@@ -1,5 +1,19 @@
 # 更新日志
 
+## [0.8.5] - 2026-10-29
+
+> 0.8.4 之后的内部维护；无用户可见的行为变更。
+
+### 变更
+- 索引进度上报收敛为 `_progress_reporter`：`/vm 索引` 与 `/vm 重建` 共用同一套「线程回调 → 队列节流 → 发送」逻辑，删除约 50 行重复实现
+- `_cmd_rebuild` 拆分出 `_swap_rebuilt_db` / `_restore_failed_rebuild`，主流程从 194 行降到 139 行
+- `embedder_backend=auto` 的 provider 探测去掉猜测性的 async 协程分支（AstrBot 的 `get_all_embedding_providers` 同步返回列表）
+- DB 行解析收敛：`_parse_vector_id` / `_parse_sub_tags` 统一处理脏 vector_id 与 sub_tags，替换 8 处重复的 try/except
+
+### 新增
+- `tests/helpers.py`：共享 `FakeEvent` / `make_plugin` / `run_async` / `texts` / `write_png`，消除 9 个测试文件里的重复构造
+- 真库 caption 落库用例与脏 vector_id 用例；测试总数 145 → 147，覆盖率 70% → 71%
+
 ## [0.8.4] - 2026-10-29
 
 ### 变更
