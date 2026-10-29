@@ -190,6 +190,8 @@ python scripts/copy_meme_manager_library.py
 
 > `/vm 搜索` 只认显式 `--tag <name>`，不再用“最后一个词是 tag”的启发式，避免查询文本里恰好出现标签名时被误判。
 
+> api 后端没有图片向量：`/vm 去重`、`/vm 自动分类` 与 `/vm 评测` 基于 caption 文本向量。去重是“语义近重复”而非像素级重复，建议先 `preview` 人工确认再 `apply`；分类/评测结果也受 caption 质量影响。
+
 ## LLM 集成
 
 ### `%%tag%%` 占位符
