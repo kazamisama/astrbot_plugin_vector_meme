@@ -1,6 +1,6 @@
 # 更新日志
 
-## [Unreleased]
+## [0.8.6] - 2026-10-29
 
 ### 修复
 - api 后端（图片向量不落库，vector_id=-1）下，`/vm 自动分类`、`/vm 评测`、`/vm 去重` 现在回退使用 caption 文本向量；此前这三条命令会静默返回空结果。新增 `MemeDatabase.vector_slot_for_row()`（图片向量优先、缺失时用 caption_vector_id），分类、去重与相关 tag 计算共用该回退
