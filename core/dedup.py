@@ -45,7 +45,10 @@ def cluster_near_duplicates(
     min_group: int = 2,
     max_groups: int = 200,
 ) -> list[DupGroup]:
-    """返回近重复簇，每个簇至少 min_group 个成员；按代表图使用次数降序。"""
+    """返回近重复簇，每个簇至少 min_group 个成员；按代表图使用次数降序。
+
+    向量源由 db.active_vector_rows() 决定：图片向量优先，api 后端回退 caption 向量。
+    """
     rows, vecs = db.active_vector_rows()
     if len(rows) < 2 or vecs.size == 0:
         return []

@@ -85,6 +85,7 @@ def test_dual_pick_multiple_accepts_query_vector(tmp_path):
         n=2,
         stochastic=False,
         query_vector=emb.embed_text("开心大笑"),
+        expand_pool=False,
     )
     assert len(hits) == 2
     assert {h.meme_id for h in hits} == {ids["开心大笑"], ids["平静微笑"]}

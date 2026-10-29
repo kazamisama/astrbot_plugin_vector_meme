@@ -278,6 +278,24 @@ def test_classify_vector_and_classify_meme_branches(tmp_path):
     assert retriever.classify_meme(no_vector) == []
 
 
+def test_classify_uses_caption_vector_fallback(tmp_path):
+    db = MemeDatabase(tmp_path / "m.db", tmp_path / "m.faiss", dim=16)
+    emb = DummyEmbedder(16, seed=81)
+    texts = [("happy", "happy one"), ("happy", "happy two"), ("sad", "sad one")]
+    cap_ids = db.add_vectors(np.stack([emb.embed_text(text) for _, text in texts]))
+    ids = []
+    for i, (tag, text) in enumerate(texts):
+        mid = db.upsert_meme(str(tmp_path / f"{i}.png"), f"h{i}", tag, -1)
+        db.set_meme_caption(mid, text, int(cap_ids[i]))
+        ids.append(mid)
+
+    retriever = MemeRetriever(db, emb, candidate_pool_size=3, random_jitter=0.0)
+    classified = retriever.classify_vector(emb.embed_text("happy one"), topk=2)
+    assert classified and classified[0]["tag"] == "happy"
+    predicted = retriever.classify_meme(ids[0], topk=2)
+    assert predicted and predicted[0]["tag"] == "happy"
+
+
 def test_retriever_helper_guards_and_power_branch(tmp_path):
     from core.retriever import MemeHit
 

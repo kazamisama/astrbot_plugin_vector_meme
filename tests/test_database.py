@@ -81,6 +81,26 @@ def test_dirty_vector_ids_are_skipped_and_flagged(db):
     assert h["bad_caption_vector_ids_count"] == 1
 
 
+def test_active_vector_rows_falls_back_to_caption_vector(db):
+    img_ids = db.add_vectors(np.ones((1, 8), dtype="float32"))
+    cap_ids = db.add_vectors(np.full((1, 8), 2.0, dtype="float32"))
+    api_row = db.upsert_meme("api.png", "h1", "happy", -1)
+    db.set_meme_caption(api_row, "caption", int(cap_ids[0]))
+    both_row = db.upsert_meme("both.png", "h2", "sad", int(img_ids[0]))
+    db.set_meme_caption(both_row, "caption2", int(cap_ids[0]))
+
+    assert db.vector_slot_for_row(db.get_meme(api_row)) == int(cap_ids[0])
+    assert db.vector_slot_for_row(db.get_meme(both_row)) == int(img_ids[0])
+
+    rows, vecs = db.active_vector_rows()
+    assert {row["id"] for row in rows} == {api_row, both_row}
+    assert vecs.shape == (2, 8)
+    np.testing.assert_allclose(np.linalg.norm(vecs, axis=1), np.ones(2), atol=1e-6)
+
+    no_vector = db.upsert_meme("empty.png", "h3", "misc", -1)
+    assert db.vector_slot_for_row(db.get_meme(no_vector)) is None
+
+
 def test_health_does_not_flag_missing_caption_as_bad(db):
     vids = db.add_vectors(np.ones((1, 8), dtype="float32"))
     db.upsert_meme("x.png", "h", "happy", int(vids[0]))

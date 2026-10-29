@@ -27,6 +27,22 @@ def test_cluster_finds_near_duplicate_group(tmp_path):
     assert sorted(big.member_ids) == [ids[0], ids[1]]
 
 
+def test_cluster_uses_caption_vectors_when_image_vectors_missing(tmp_path):
+    db = MemeDatabase(tmp_path / "m.db", tmp_path / "m.faiss", dim=16)
+    emb = DummyEmbedder(16, seed=67)
+    same = emb.embed_text("same caption")
+    other = emb.embed_text("other caption")
+    cap_ids = db.add_vectors(np.stack([same, same, other]))
+    ids = []
+    for i, cid in enumerate(cap_ids):
+        mid = db.upsert_meme(str(tmp_path / f"{i}.png"), f"h{i}", "dup", -1)
+        db.set_meme_caption(mid, f"c{i}", int(cid))
+        ids.append(mid)
+
+    groups = cluster_near_duplicates(db, threshold=0.999, min_group=2)
+    assert any(sorted(g.member_ids) == [ids[0], ids[1]] for g in groups)
+
+
 def test_apply_dedup_disables_dups_and_undo_restores(tmp_path):
     db, ids = _build(tmp_path)
     stats = apply_dedup(db, threshold=0.95, min_group=2, dry_run=True)

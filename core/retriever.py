@@ -606,7 +606,7 @@ class MemeRetriever:
         knn_k: int = 12,
         prototype_min_samples: int = 2,
     ) -> list[dict]:
-        """基于 tag prototype + KNN 对图片向量分类。"""
+        """基于 tag prototype + KNN 分类；图片向量缺失时用 caption 向量。"""
         rows, vecs = self.db.active_vector_rows(exclude_meme_id=exclude_meme_id)
         if not rows or vecs.size == 0:
             return []
@@ -666,10 +666,10 @@ class MemeRetriever:
         row = self.db.get_meme(meme_id)
         if not row:
             return []
-        vid = int(row["vector_id"])
-        if vid < 0 or vid >= self.db.index_size:
+        slot = self.db.vector_slot_for_row(row)
+        if slot is None:
             return []
-        vector = self.db.reconstruct(vid)
+        vector = self.db.reconstruct(slot)
         return self.classify_vector(
             vector,
             exclude_meme_id=meme_id,

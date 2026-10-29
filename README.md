@@ -67,7 +67,7 @@ memes/
 |---|---|
 | `auto`（默认） | 启动时探测：torch + open_clip 可导入 → `open_clip`；否则有 Embedding 提供商 → `api`；都没有 → 回退 `open_clip` 并在首次使用提示安装 |
 | `open_clip` | 本地 OpenCLIP，图片 + 文本双模态向量；需 `requirements-openclip.txt` |
-| `api` | 调用 AstrBot 已配置的 Embedding 提供商；图片不可直接编码，必须依赖 vision caption，检索走 caption 文本向量；`/vm 自动分类` 不可用 |
+| `api` | 调用 AstrBot 已配置的 Embedding 提供商；图片不可直接编码，必须依赖 vision caption，检索、自动分类、评测与去重都走 caption 文本向量（图片向量缺失时自动回退） |
 | `dummy` | 随机向量，仅用于测试链路 |
 
 换模型架构后向量维度会变（如 ViT-B-32=512、ViT-L-14=768），需要 `/vm 重建`。

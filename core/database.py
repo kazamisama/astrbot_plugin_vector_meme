@@ -317,11 +317,24 @@ class MemeDatabase:
             return []
         return tags if isinstance(tags, list) else []
 
+    def vector_slot_for_row(self, row: dict) -> int | None:
+        """返回该行可用的 FAISS 向量槽：图片向量优先，缺失/越界时回退 caption 向量。
+
+        api 后端不落图片向量（vector_id=-1），只把 caption 文本向量写进索引；
+        分类、去重与相关 tag 计算必须能用到这部分向量。
+        """
+        for column in ("vector_id", "caption_vector_id"):
+            vid = self._parse_vector_id(row.get(column))
+            if vid is not None and 0 <= vid < self.index_size:
+                return vid
+        return None
+
     def active_vector_rows(
         self, exclude_meme_id: int | None = None
     ) -> tuple[list[dict], np.ndarray]:
-        """返回 (rows, normalized_vectors)，仅含 vector_id 落在索引内的行。
+        """返回 (rows, normalized_vectors)，仅含可用向量槽的启用行。
 
+        每个行走 vector_slot_for_row：图片向量优先，api 后端回退 caption 向量。
         tag prototype、KNN 分类与近重复聚类都要这份"启用行 + 归一化向量"，
         放在 DB 层避免三处各拼一遍 SQL/FAISS 映射。
         """
@@ -333,10 +346,10 @@ class MemeDatabase:
         for row in self.list_memes(limit=10_000_000):
             if exclude_meme_id is not None and int(row["id"]) == int(exclude_meme_id):
                 continue
-            vid = self._parse_vector_id(row["vector_id"])
-            if vid is not None and 0 <= vid < self.index_size:
+            slot = self.vector_slot_for_row(row)
+            if slot is not None:
                 rows.append(row)
-                vecs.append(all_vecs[vid])
+                vecs.append(all_vecs[slot])
         if not vecs:
             return rows, np.empty((0, self.dim), dtype="float32")
         arr = np.stack(vecs, axis=0).astype("float32")

@@ -2,6 +2,9 @@
 
 ## [Unreleased]
 
+### 修复
+- api 后端（图片向量不落库，vector_id=-1）下，`/vm 自动分类`、`/vm 评测`、`/vm 去重` 现在回退使用 caption 文本向量；此前这三条命令会静默返回空结果。新增 `MemeDatabase.vector_slot_for_row()`（图片向量优先、缺失时用 caption_vector_id），分类、去重与相关 tag 计算共用该回退
+
 ### 新增
 - `tests/test_commands.py`：只读/维护子命令与文本入口的端到端测试（列表、标签、最近使用、诊断、搜索、解释、重标注、删除、schema、prompt 重载、预热、caption 导入导出、自动分类、评测、terminate）
 - `tests/test_indexer.py` 补充索引器分支覆盖：坏图/嵌入失败、api 后端无向量入库、增量更新、批处理进度、root 外文件、动画 GIF
@@ -10,7 +13,8 @@
 - `tests/test_retriever.py` 补充 prototype/KNN 分类、加权采样、pick_multiple 与 DualRetriever 的 caption 关闭/空 caption/无 rerank 分支
 - `tests/test_command_edges.py`：命令入口的错误分支与边界输入（文本入口、未初始化 DB、搜索/解释空结果与扩展 tag、评测混淆、重标注/删除、tag schema 缺失、自动分类 apply 跳过、caption 错误、准备库时 close 失败）
 - `tests/test_remaining_edges.py`：初始化配置拍平与默认 data_dir、发送失败兜底、索引/重建/修复守卫、去重阈值解析、legacy/重复/限量 tag、查询向量边界、装饰与补发外层异常、terminate 清理异常、备份还原失败
-- 测试总数 147 → 224，覆盖率 71% → 96%（main.py 52% → 98%，retriever 80% → 99%，retriever_dual 84% → 97%，indexer 74% → 98%）
+- `tests/test_api_backend_fallback.py`：api 后端（vector_id 全 -1）下自动分类、评测与去重改用 caption 向量；数据库/去重/检索器补充 caption 回退单测
+- 测试总数 147 → 228，覆盖率 71% → 96%（main.py 52% → 98%，retriever 80% → 99%，retriever_dual 84% → 100%，indexer 74% → 98%）
 
 ### 变更
 - CI 覆盖率门禁从 55% 提升到 80%
