@@ -46,7 +46,7 @@ from .core.version import VERSION
 try:
     # AstrBot v4.25.5：命令 handler 剩余参数按 GreedyStr 注解聚合为完整字符串
     from astrbot.core.star.filter.command import GreedyStr as _CmdGreedyStr
-except Exception:
+except ImportError:
     # 旧版 AstrBot 兜底：按普通 str 处理（仅接收第一个参数）
     _CmdGreedyStr = str
 
@@ -235,8 +235,9 @@ class VectorMemePlugin(Star):
             fp = getattr(self._embedder, "fingerprint", "")
             if fp:
                 return str(fp)
-        except Exception:
-            pass
+        except Exception as exc:
+            # 自定义 embedder 的 fingerprint 可能抛异常：降级为 backend:dim
+            logger.debug(f"[{PLUGIN_NAME}] 读取 embedder 指纹失败，回退到 backend:dim: {exc}")
         return f"{self._backend_name}:{self._embedder.dim}"
 
     def _prepare_library_for_embedder(self) -> None:
@@ -259,8 +260,9 @@ class VectorMemePlugin(Star):
         if stored_fingerprint and stored_fingerprint != fingerprint and total_rows > 0:
             try:
                 self._embedder.close()
-            except Exception:
-                pass
+            except Exception as exc:
+                # 清理旧实例是尽力而为，失败不能掩盖紧接着要抛出的指纹不兼容错误
+                logger.debug(f"[{PLUGIN_NAME}] 关闭旧 embedder 失败: {exc}")
             self._embedder = None
             self._indexer = None
             self._retriever = None
@@ -276,8 +278,9 @@ class VectorMemePlugin(Star):
             if existing_count > 0:
                 try:
                     self._embedder.close()
-                except Exception:
-                    pass
+                except Exception as exc:
+                    # 清理旧实例是尽力而为，失败不能掩盖紧接着要抛出的不兼容错误
+                    logger.debug(f"[{PLUGIN_NAME}] 关闭旧 embedder 失败: {exc}")
                 self._embedder = None
                 raise RuntimeError(
                     f"embedder 维度 ({embedder_dim}) 与现有库维度 ({db.dim}) 不一致，"
@@ -414,7 +417,7 @@ class VectorMemePlugin(Star):
             return {}
         try:
             data = json.loads(path.read_text(encoding="utf-8"))
-        except Exception as e:
+        except (OSError, ValueError) as e:
             logger.warning(f"[{PLUGIN_NAME}] captions.json 读取失败: {e}")
             return {}
         if not isinstance(data, dict):
@@ -424,7 +427,8 @@ class VectorMemePlugin(Star):
         for rel, cap in data.items():
             try:
                 abs_path = str((meme_dir / str(rel)).resolve())
-            except Exception:
+            except (OSError, ValueError) as exc:
+                logger.debug(f"[{PLUGIN_NAME}] 跳过非法 caption 路径 {rel!r}: {exc}")
                 continue
             caption_text = str(cap or "").strip()
             if caption_text:
@@ -562,6 +566,7 @@ class VectorMemePlugin(Star):
             try:
                 return bool(fn())
             except Exception:
+                # 不同 AstrBot 版本 is_admin 可能抛异常：按非管理员处理
                 return False
         return bool(getattr(event, "role", None) == "admin")
 
@@ -984,8 +989,9 @@ class VectorMemePlugin(Star):
             if not embedder_was_loaded and self._embedder is not None:
                 try:
                     self._embedder.close()
-                except Exception:
-                    pass
+                except Exception as exc:
+                    # 清理旧实例是尽力而为，失败不能掩盖紧接着要抛出的不兼容错误
+                    logger.debug(f"[{PLUGIN_NAME}] 关闭旧 embedder 失败: {exc}")
                 self._embedder = None
             self._indexer = old_indexer
             self._retriever = old_retriever
@@ -1204,7 +1210,7 @@ class VectorMemePlugin(Star):
             data = json.loads(schema_path.read_text(encoding="utf-8"))
             tags = data.get("tags", data)
             return tags if isinstance(tags, dict) else {}
-        except Exception as e:
+        except (OSError, ValueError) as e:
             logger.warning(f"[{PLUGIN_NAME}] tag_schema 读取失败: {e}")
             return {}
 
@@ -1407,6 +1413,7 @@ class VectorMemePlugin(Star):
                 try:
                     preds = retriever.classify_meme(int(meme_id), topk=5)
                 except Exception:
+                    # 单条样本失败计入 failed，不中断整批评测
                     failed += 1
                     continue
                 if not preds:
@@ -1539,7 +1546,7 @@ class VectorMemePlugin(Star):
         def _parse_float(s: str, fallback: float) -> float:
             try:
                 return float(s)
-            except Exception:
+            except (TypeError, ValueError):
                 return fallback
 
         if self._db is None or self._db.total_row_count() <= 0:
@@ -2078,5 +2085,6 @@ class VectorMemePlugin(Star):
                 self._embedder.close()
             if self._db is not None:
                 self._db.save_index()
-        except Exception:
-            pass
+        except Exception as exc:
+            # 插件卸载阶段尽力保存/释放，失败不影响退出流程
+            logger.debug(f"[{PLUGIN_NAME}] terminate 清理失败: {exc}")

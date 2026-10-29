@@ -155,6 +155,8 @@ class MemeDatabase:
                     self.dim = idx.d
                 return idx
             except Exception as exc:
+                # faiss 对损坏索引可能抛 RuntimeError/OSError 等不同异常：
+                # 任何读取失败都按"索引损坏"降级，让上层提示 /vm 修复 或重建
                 logger.error("FAISS index load failed for %s: %s", self.index_path, exc)
                 self.index_corrupted = True
                 return faiss.IndexFlatIP(self.dim)
@@ -189,6 +191,7 @@ class MemeDatabase:
                     self.index_corrupted = False
                     return
                 except Exception as exc:
+                    # 与加载路径同理：损坏表现因版本而异，统一降级为空索引并标记损坏
                     logger.error("FAISS index reload failed for %s: %s", self.index_path, exc)
                     self._index = faiss.IndexFlatIP(self.dim)
                     self.index_corrupted = True
@@ -311,7 +314,8 @@ class MemeDatabase:
                 continue
             try:
                 vid = int(row["vector_id"])
-            except Exception:
+            except (TypeError, ValueError):
+                # 脏 vector_id（NULL/非数字）：跳过该行，不参与聚类
                 continue
             if 0 <= vid < self.index_size:
                 rows.append(row)
@@ -528,7 +532,8 @@ class MemeDatabase:
                 continue
             try:
                 vid = int(raw)
-            except Exception:
+            except (TypeError, ValueError):
+                # 脏 vector_id（NULL/非数字）：跳过该行
                 continue
             if 0 <= vid < max_size:
                 out.append((vid, int(r["id"])))
@@ -582,7 +587,8 @@ class MemeDatabase:
                 tags = json.loads(row["sub_tags"] or "[]")
                 if not isinstance(tags, list):
                     tags = []
-            except Exception:
+            except (TypeError, ValueError):
+                # sub_tags 脏数据：按空列表处理，不阻断本次写入
                 tags = []
             if subtag and subtag not in [str(t) for t in tags]:
                 tags.append(subtag)
@@ -609,7 +615,8 @@ class MemeDatabase:
                 sub_tags = json.loads(row["sub_tags"] or "[]")
                 if not isinstance(sub_tags, list):
                     sub_tags = []
-            except Exception:
+            except (TypeError, ValueError):
+                # sub_tags 脏数据：按空列表处理
                 sub_tags = []
             if keep_old_as_subtag and old_tag and old_tag != new_tag and old_tag not in sub_tags:
                 sub_tags.append(old_tag)
@@ -734,7 +741,7 @@ class MemeDatabase:
             for col in ("vector_id", "caption_vector_id"):
                 try:
                     vid = int(r[col]) if r[col] is not None else -1
-                except Exception:
+                except (TypeError, ValueError):
                     vid = -1
                 if 0 <= vid < max_size:
                     count += 1
@@ -755,13 +762,13 @@ class MemeDatabase:
         for r in rows:
             try:
                 vid = int(r["vector_id"])
-            except Exception:
+            except (TypeError, ValueError):
                 vid = -1
             if 0 <= vid < max_size:
                 image_rows.append(r)
             try:
                 cvid = int(r["caption_vector_id"]) if r["caption_vector_id"] is not None else -1
-            except Exception:
+            except (TypeError, ValueError):
                 cvid = -1
             if 0 <= cvid < max_size:
                 caption_rows.append(r)
@@ -842,7 +849,8 @@ class MemeDatabase:
             elif verify_hashes:
                 try:
                     current_hash = compute_file_hash(p)
-                except Exception:
+                except OSError:
+                    # 扫描过程中文件消失/不可读：hash 记空，随后会进 stale 列表
                     current_hash = ""
                 if current_hash != r["file_hash"]:
                     stale_hash_files.append(
@@ -856,18 +864,19 @@ class MemeDatabase:
             if root_path is not None:
                 try:
                     p.resolve().relative_to(root_path)
-                except Exception:
+                except ValueError:
+                    # 不在 root 下：记为图库目录外的孤儿文件
                     orphan_outside_root.append({"id": r["id"], "file_path": r["file_path"]})
             try:
                 vid = int(r["vector_id"])
-            except Exception:
+            except (TypeError, ValueError):
                 vid = -1
             if vid < 0 or vid >= self.index_size:
                 bad_vector_ids.append({"id": r["id"], "vector_id": r["vector_id"]})
             if r["caption_vector_id"] is not None:
                 try:
                     cvid = int(r["caption_vector_id"])
-                except Exception:
+                except (TypeError, ValueError):
                     cvid = -1
                 if cvid < 0 or cvid >= self.index_size:
                     bad_caption_vector_ids.append({"id": r["id"], "caption_vector_id": r["caption_vector_id"]})
@@ -880,7 +889,7 @@ class MemeDatabase:
             for col in ("vector_id", "caption_vector_id"):
                 try:
                     vid = int(r[col]) if r[col] is not None else -1
-                except Exception:
+                except (TypeError, ValueError):
                     vid = -1
                 if 0 <= vid < max_size:
                     live_vectors += 1

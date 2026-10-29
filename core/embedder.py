@@ -283,8 +283,9 @@ class OpenCLIPEmbedder(BaseEmbedder):
             torch = self._torch()
             if self._device.startswith("cuda"):
                 torch.cuda.empty_cache()
-        except Exception:
-            pass
+        except Exception as exc:
+            # 释放 GPU 资源是尽力而为：失败不影响 close 语义
+            logger.debug("OpenCLIP embedder close failed: %s", exc)
 
 
 # -------------------- API (AstrBot Embedding 提供商) --------------------

@@ -143,7 +143,7 @@ def apply_dedup(
 def _has_dedup_marker(sub_tags) -> bool:
     try:
         tags = json.loads(sub_tags or "[]")
-    except Exception:
+    except (TypeError, ValueError):
         return False
     if not isinstance(tags, list):
         return False
@@ -166,7 +166,7 @@ def undo_dedup(db: MemeDatabase, remove_marker: bool = True) -> dict:
                 try:
                     tags = json.loads(r["sub_tags"] or "[]")
                     tags = [t for t in tags if not str(t).startswith(DEDUP_TAG_PREFIX)]
-                except Exception:
+                except (TypeError, ValueError):
                     tags = []
                 with db._conn() as c2:  # noqa: SLF001
                     c2.execute(
