@@ -24,19 +24,20 @@
       "embedder_backend": {
         "description": "嵌入模型后端",
         "type": "string",
-        "default": "open_clip",
+        "default": "auto",
         "options": [
+          "auto",
           "open_clip",
           "api",
           "dummy"
         ],
-        "hint": "open_clip = OpenCLIP ViT-B-32（推荐）；api = AstrBot Embedding 提供商（需开启 vision caption）；dummy = 随机向量（仅用于测试）。换模型架构后向量维度会变（ViT-B-32=512、ViT-L-14=768），需 /vm 重建"
+        "hint": "auto = 自动选择（默认）：torch + open_clip 可导入时用本地模型，否则有 AstrBot Embedding 提供商时用 api，都没有则提示安装 requirements-openclip.txt；open_clip = 强制本地 OpenCLIP（需 requirements-openclip.txt）；api = 强制 AstrBot Embedding 提供商（需开启 vision caption）；dummy = 随机向量（仅用于测试）。换模型架构后向量维度会变（ViT-B-32=512、ViT-L-14=768），需 /vm 重建"
       },
       "embedding_provider_id": {
         "description": "AstrBot Embedding 提供商 ID",
         "type": "string",
         "default": "",
-        "hint": "填写 AstrBot「服务提供商」中已配置的 Embedding 提供商 ID；留空自动使用第一个可用提供商。仅 embedder_backend=api 时生效"
+        "hint": "填写 AstrBot「服务提供商」中已配置的 Embedding 提供商 ID；留空自动使用第一个可用提供商。仅 embedder_backend=api（或 auto 回落到 api）时生效"
       },
       "device": {
         "description": "推理设备",
@@ -88,7 +89,7 @@
         "description": "启用 vision LLM 生成表情语义描述（caption），并参与双路向量检索",
         "type": "bool",
         "default": false,
-        "hint": "需要 AstrBot 配置了支持图片输入的视觉模型；开启后索引/重建会自动补 caption，也可用 /vm caption 手动补。embedder_backend=api 时强制开启"
+        "hint": "需要 AstrBot 配置了支持图片输入的视觉模型；开启后索引/重建会自动补 caption，也可用 /vm caption 手动补。embedder_backend=api（含 auto 回落到 api）时强制开启"
       },
       "vision_provider_id": {
         "description": "生成 caption 的视觉模型",

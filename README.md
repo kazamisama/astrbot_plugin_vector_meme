@@ -11,11 +11,11 @@
 ## 功能特性
 
 - **向量检索选图**：回复文本与表情图片在同一向量空间比对，按相似度选图。
-- **多嵌入后端**：`open_clip`（默认）、`api`（AstrBot Embedding 提供商）、`dummy`（测试链路）。
+- **多嵌入后端**：`auto`（默认，自动选择）、`open_clip`（本地视觉模型）、`api`（AstrBot Embedding 提供商）、`dummy`（测试链路）。
 - **两阶段检索**：先按 tag 限定候选集，再用文本向量精排。
 - **混合打分**：`raw_similarity + tag_bonus - repeat_penalty - usage_penalty + random_jitter`。
 - **反重复与多样性**：近期/高频使用过的图自动降权，TopK 内按分数加权随机采样。
-- **视觉 caption 双路融合**：可选开启 vision 模型生成语义描述，检索时融合 caption 文本向量与图片向量（`embedder_backend=api` 时强制开启）。
+- **视觉 caption 双路融合**：可选开启 vision 模型生成语义描述，检索时融合 caption 文本向量与图片向量（`embedder_backend=api` 或 auto 回落到 api 时强制开启）。
 - **自动分类辅助**：基于 tag prototype 原型向量 + KNN 最近邻投票预测标签。
 - **标签治理**：`tag_schema.json` 统一管理 17 个标签的类别、含义、视觉特征和排除项。
 - **诊断与修复**：健康检查 DB / FAISS / 文件系统一致性；`/vm 修复` 清理缺失文件、注册标签、压缩孤儿向量。
@@ -24,19 +24,21 @@
 
 ## 快速开始
 
-默认使用 `open_clip` 本地视觉后端，需安装含 PyTorch 的完整依赖（约 2.5GB）：
+默认 `embedder_backend=auto`：能加载 torch/open_clip 时用本地视觉后端，否则自动改用 AstrBot Embedding 提供商。只装核心依赖即可启动（api / dummy 场景无需 PyTorch）：
 
 ```bash
 git clone https://github.com/kazamisama/astrbot_plugin_vector_meme.git
 cd astrbot_plugin_vector_meme
+pip install -r requirements.txt
+```
+
+想要本地图片向量（效果最完整，约 2.5GB）时，再安装 OpenCLIP 可选依赖：
+
+```bash
 pip install -r requirements-openclip.txt
 ```
 
-若改用 `api` 后端（AstrBot 已配置 Embedding 提供商），只装核心依赖、不装 torch：
-
-```bash
-pip install -r requirements.txt
-```
+`auto` 两者都不可用时会暂用 `open_clip`，首次使用报错并提示上面两条安装/配置路径。
 
 把表情放进 `memes/` 目录，子目录名作为 tag：
 
@@ -63,8 +65,8 @@ memes/
 
 | 后端 | 说明 |
 |---|---|
-| `open_clip`（默认） | 本地 OpenCLIP，图片 + 文本双模态向量；需 `requirements-openclip.txt` |
-
+| `auto`（默认） | 启动时探测：torch + open_clip 可导入 → `open_clip`；否则有 Embedding 提供商 → `api`；都没有 → 回退 `open_clip` 并在首次使用提示安装 |
+| `open_clip` | 本地 OpenCLIP，图片 + 文本双模态向量；需 `requirements-openclip.txt` |
 | `api` | 调用 AstrBot 已配置的 Embedding 提供商；图片不可直接编码，必须依赖 vision caption，检索走 caption 文本向量；`/vm 自动分类` 不可用 |
 | `dummy` | 随机向量，仅用于测试链路 |
 
@@ -87,7 +89,7 @@ memes/
 
 ```json
 {
-  "embedder_backend": "open_clip",
+  "embedder_backend": "auto",
   "device": "cpu",
   "meme_dir": "",
   "data_dir": "",

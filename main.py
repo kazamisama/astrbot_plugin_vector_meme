@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import importlib.util
 import json
 import os
 import random
@@ -54,6 +55,14 @@ PLUGIN_NAME = "vector_meme"
 
 # embedder 加载前的临时向量维度，真实维度以 embedder 为准
 INIT_TEMP_DIM = 512
+
+
+def _module_available(name: str) -> bool:
+    """探测模块是否可导入（不真正 import，避免加载 torch）。"""
+    try:
+        return importlib.util.find_spec(name) is not None
+    except (ImportError, AttributeError, ValueError):
+        return False
 
 # 默认占位符格式：%%<tag>%%
 # 可选兼容旧格式：&&<tag>&& 或 :<tag>:（见 allow_legacy_markup 配置）
@@ -151,8 +160,9 @@ class VectorMemePlugin(Star):
         self.data_dir.mkdir(parents=True, exist_ok=True)
 
         self.meme_dir_setting = self.config.get("meme_dir") or ""
-        backend = self.config.get("embedder_backend", "open_clip")
-        self._backend_name = backend
+        requested_backend = str(self.config.get("embedder_backend") or "auto").strip() or "auto"
+        self._requested_backend = requested_backend
+        self._backend_name = self._resolve_embedder_backend(requested_backend)
         self._embedder: BaseEmbedder | None = None
 
         # ---------- 延迟加载 embedder ----------
@@ -162,7 +172,7 @@ class VectorMemePlugin(Star):
         self._retriever: MemeRetriever | None = None
         self._captioner: CaptionGenerator | None = None
         self.caption_enabled = bool(self.config.get('enable_vision_caption', False))
-        if backend == "api":
+        if self._backend_name == "api":
             # api 后端：图片不可直接编码，必须依赖 caption 文本向量
             self.caption_enabled = True
         self._mutation_lock = asyncio.Lock()
@@ -174,6 +184,56 @@ class VectorMemePlugin(Star):
         self._inject_into_personas()  # 首次尝试注入（DB 可能为空）
 
     # ---------- 初始化 ----------
+
+    def _resolve_embedder_backend(self, requested: str) -> str:
+        """把 auto 解析为具体后端；显式配置原样返回。
+
+        auto 判定顺序：torch + open_clip 可导入 -> open_clip；
+        否则上下文里已有 Embedding 提供商 -> api；
+        两者都没有 -> 继续用 open_clip，首次使用时报错并给出安装指引。
+        """
+        if requested != "auto":
+            return requested
+        if _module_available("open_clip") and _module_available("torch"):
+            logger.debug(f"[{PLUGIN_NAME}] embedder_backend=auto -> open_clip（已安装 torch/open_clip）")
+            return "open_clip"
+        if self._has_embedding_provider():
+            logger.info(
+                f"[{PLUGIN_NAME}] embedder_backend=auto -> api"
+                "（未安装 torch/open_clip，改用 AstrBot Embedding 提供商）"
+            )
+            return "api"
+        logger.warning(
+            f"[{PLUGIN_NAME}] embedder_backend=auto：未检测到 torch/open_clip 与可用的 Embedding 提供商，"
+            "暂用 open_clip；首次使用会提示安装 requirements-openclip.txt 或配置提供商"
+        )
+        return "open_clip"
+
+    def _has_embedding_provider(self) -> bool:
+        """尽力探测上下文里是否已有 Embedding 提供商；不加载 provider 本身。"""
+        getter = getattr(self.context, "get_all_embedding_providers", None)
+        if not callable(getter):
+            return False
+        try:
+            providers = getter()
+        except Exception as exc:
+            logger.debug(f"[{PLUGIN_NAME}] 探测 Embedding 提供商失败: {exc}")
+            return False
+        if asyncio.iscoroutine(providers):
+            # 同步 __init__ 里无法 await：关闭协程并按“存在 provider”处理
+            providers.close()
+            return True
+        try:
+            return bool(providers)
+        except Exception as exc:
+            logger.debug(f"[{PLUGIN_NAME}] Embedding 提供商列表真值判断失败: {exc}")
+            return True
+
+    def _backend_label(self) -> str:
+        """状态展示用：auto 解析后显示 auto→实际后端。"""
+        if self._requested_backend != self._backend_name:
+            return f"{self._requested_backend}→{self._backend_name}"
+        return self._backend_name
 
     def _init_storage(self) -> None:
         """先以 dummy 维度建库，等 embedder 准备好再对齐。"""
@@ -679,7 +739,7 @@ class VectorMemePlugin(Star):
             f"- 标签数: {s['tags']}\n"
             f"- FAISS 向量数: {s['index_size']}\n"
             f"- 向量维度: {s['dim']}\n"
-            f"- 后端: {self._backend_name}\n"
+            f"- 后端: {self._backend_label()}\n"
             f"- embedder: {'已加载' if self._embedder is not None else '未加载'}\n"
             f"- FAISS 索引: {'损坏，建议 /vm 重建' if s['index_corrupted'] else '正常'}\n"
             f"- meme_dir: {self.meme_dir}\n"
