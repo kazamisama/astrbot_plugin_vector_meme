@@ -82,6 +82,46 @@ def test_dual_retriever_uses_caption_path(tmp_path):
     assert res.hits[0].meme_id == m1
 
 
+def test_dual_retriever_skips_caption_when_disabled_or_empty(tmp_path):
+    db = MemeDatabase(tmp_path / "m.db", tmp_path / "m.faiss", dim=16)
+    emb = DummyEmbedder(16, seed=71)
+    vids = db.add_vectors(np.stack([emb.embed_text("happy cat")]))
+    mid = db.upsert_meme(str(tmp_path / "a.png"), "a", "happy", int(vids[0]))
+
+    disabled = DualRetriever(
+        db, emb, caption_weight=0.0, candidate_pool_size=2, random_jitter=0.0
+    )
+    base = disabled.retrieve("happy cat", tag="happy", topk=1)
+    assert base.hits and base.hits[0].meme_id == mid
+
+    empty_captions = DualRetriever(
+        db, emb, caption_weight=0.6, candidate_pool_size=2, random_jitter=0.0
+    )
+    base2 = empty_captions.retrieve("happy cat", tag="happy", topk=1)
+    assert base2.hits and base2.hits[0].meme_id == mid
+
+
+def test_dual_retriever_caption_only_without_rerank(tmp_path):
+    db = MemeDatabase(tmp_path / "m.db", tmp_path / "m.faiss", dim=16)
+    emb = DummyEmbedder(16, seed=73)
+    cap_ids = db.add_vectors(np.stack([emb.embed_text("smiling cat")]))
+    mid = db.upsert_meme(str(tmp_path / "a.png"), "a", "happy", -1)
+    db.set_meme_caption(mid, "smiling cat", int(cap_ids[0]))
+    retriever = DualRetriever(
+        db, emb, caption_weight=1.0, candidate_pool_size=2, random_jitter=0.0
+    )
+
+    result = retriever.retrieve("smiling cat", tag="happy", topk=1, rerank=False)
+
+    assert result.hits
+    assert result.hits[0].meme_id == mid
+
+
+def test_dual_minmax_edges():
+    assert DualRetriever._minmax({}) == {}
+    assert DualRetriever._minmax({1: 0.5, 2: 0.5}) == {1: 1.0, 2: 1.0}
+
+
 def test_retrieve_rerank_false_is_deterministic(tmp_path):
     db = MemeDatabase(tmp_path / "m.db", tmp_path / "m.faiss", dim=16)
     emb = DummyEmbedder(16, seed=3)
@@ -173,6 +213,69 @@ def test_pick_hard_exclude_recent(tmp_path):
     )
     hit2 = retriever2.pick("query text", tag="happy", stochastic=False)
     assert hit2.meme_id == m1
+
+
+def test_weighted_pick_edges_and_pick_multiple(library):
+    from core.retriever import MemeHit
+
+    db, emb, _ = library
+    retriever = MemeRetriever(db, emb, candidate_pool_size=3, random_jitter=0.0)
+
+    assert retriever._weighted_pick([]) is None
+    single = MemeHit(1, "a.png", "x", 0.5)
+    assert retriever._weighted_pick([single]) is single
+
+    retriever.weighted_sampling_power = 1.0
+    picked_one = retriever._weighted_pick(
+        [MemeHit(1, "a.png", "x", 0.2), MemeHit(2, "b.png", "x", 0.9)]
+    )
+    assert picked_one is not None
+
+    picked = retriever.pick_multiple("happy cat", tag="happy", n=2, stochastic=False)
+    assert len(picked) == 2
+    assert len({hit.meme_id for hit in picked}) == 2
+    assert db.get_meme(picked[0].meme_id)["usage_count"] >= 1
+
+    exhausted = retriever.pick_multiple("happy cat", n=10, stochastic=False)
+    assert len(exhausted) == 3
+
+
+def test_classify_vector_and_classify_meme_branches(tmp_path):
+    db = MemeDatabase(tmp_path / "m.db", tmp_path / "m.faiss", dim=16)
+    emb = DummyEmbedder(16, seed=61)
+    retriever = MemeRetriever(db, emb, candidate_pool_size=3, random_jitter=0.0)
+
+    assert retriever.classify_vector(emb.embed_text("anything")) == []
+
+    tags = ("alpha", "beta", "gamma")
+    vids = db.add_vectors(np.stack([emb.embed_text(tag) for tag in tags]))
+    ids = {}
+    for i, (tag, vid) in enumerate(zip(tags, vids)):
+        ids[tag] = db.upsert_meme(
+            str(tmp_path / f"{i}.png"), str(i), tag, int(vid)
+        )
+
+    query = emb.embed_text("alpha")
+    no_proto = retriever.classify_vector(
+        query, topk=5, knn_k=1, prototype_min_samples=2
+    )
+    assert len(no_proto) == 3
+    assert no_proto[0]["tag"] == "alpha"
+    assert no_proto[0]["prototype_similarity"] is None
+    assert no_proto[0]["knn_score"] is not None
+
+    mixed = retriever.classify_vector(
+        query, topk=2, knn_k=1, prototype_min_samples=1
+    )
+    assert len(mixed) == 2
+    assert any(p["knn_score"] is None for p in mixed)
+
+    predicted = retriever.classify_meme(ids["beta"], topk=3)
+    assert predicted
+    assert retriever.classify_meme(9999) == []
+
+    no_vector = db.upsert_meme("nv.png", "hn", "misc", -1)
+    assert retriever.classify_meme(no_vector) == []
 
 
 def test_pick_accepts_query_vector(tmp_path):
