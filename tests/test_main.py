@@ -6,6 +6,8 @@ import numpy as np
 import pytest
 from PIL import Image
 
+from helpers import FakeEvent, collect_async as _collect, make_plugin
+
 ROOT = Path(__file__).resolve().parent.parent
 
 
@@ -36,30 +38,18 @@ def test_persona_marker_roundtrip(main_module):
     assert main_module.PERSONA_INJECT_RE.sub("", injected) == "base prompt"
 
 
-def _make_plugin(tmp_path, personas, main_module, **extra_config):
-    class FakeProviderManager:
-        def __init__(self):
-            self.personas = personas
-
-    class FakeContext:
-        def __init__(self):
-            self.provider_manager = FakeProviderManager()
-
-    meme_dir = tmp_path / "memes"
-    meme_dir.mkdir(exist_ok=True)
-    config = {
-        "data_dir": str(tmp_path / "data"),
-        "meme_dir": str(meme_dir),
-        "embedder_backend": "dummy",
-        "enable_prompt_injection": True,
-    }
-    config.update(extra_config)
-    return main_module.VectorMemePlugin(FakeContext(), config)
+def _persona_plugin(tmp_path, personas, main_module):
+    return make_plugin(
+        tmp_path,
+        main_module,
+        personas=personas,
+        config={"enable_prompt_injection": True},
+    )
 
 
 def test_persona_marker_injection_idempotent(tmp_path, main_module):
     personas = [{"prompt": "base prompt"}]
-    plugin = _make_plugin(tmp_path, personas, main_module)
+    plugin = _persona_plugin(tmp_path, personas, main_module)
     plugin._db.upsert_tag("happy", "开心")
     plugin._inject_into_personas()
     assert personas[0]["prompt"].count(main_module.PERSONA_MARKER_START) == 1
@@ -71,7 +61,7 @@ def test_persona_marker_injection_idempotent(tmp_path, main_module):
 
 
 def test_rebuild_preserves_db_when_embedder_fails(tmp_path, monkeypatch, main_module):
-    plugin = _make_plugin(tmp_path, [], main_module)
+    plugin = make_plugin(tmp_path, main_module, personas=[])
     db = plugin._db
     vids = db.add_vectors(np.ones((1, 512), dtype="float32"))
     db.upsert_meme("old.png", "h", "happy", int(vids[0]))
@@ -111,60 +101,25 @@ def test_rebuild_preserves_db_when_embedder_fails(tmp_path, monkeypatch, main_mo
     assert n == 1
 
 
-def _make_fake_event(admin=True):
-    class FakeEvent:
-        def __init__(self):
-            self.sent = []
-            self.stopped = False
-            self.extras = {}
-
-        def is_admin(self):
-            return admin
-
-        def plain_result(self, text):
-            return ("plain", str(text))
-
-        def stop_event(self):
-            self.stopped = True
-
-        def set_extra(self, key, value):
-            self.extras[key] = value
-
-        def get_extra(self, key):
-            return self.extras.get(key)
-
-        async def send(self, chain):
-            self.sent.append(chain)
-
-    return FakeEvent()
-
-
-async def _collect(agen):
-    out = []
-    async for item in agen:
-        out.append(item)
-    return out
-
-
 def test_dispatch_blocks_admin_commands_for_members(tmp_path, main_module):
-    plugin = _make_plugin(tmp_path, [], main_module)
-    event = _make_fake_event(admin=False)
+    plugin = make_plugin(tmp_path, main_module, personas=[])
+    event = FakeEvent(admin=False)
     results = asyncio.run(_collect(plugin._dispatch_command(event, ["索引"])))
     assert event.stopped
     assert any("权限不足" in str(r) for r in results)
 
 
 def test_index_rejects_path_outside_meme_dir(tmp_path, main_module):
-    plugin = _make_plugin(tmp_path, [], main_module)
+    plugin = make_plugin(tmp_path, main_module, personas=[])
     outside = tmp_path / "outside"
     outside.mkdir()
-    event = _make_fake_event(admin=True)
+    event = FakeEvent(admin=True)
     results = asyncio.run(_collect(plugin._cmd_index(event, [str(outside)])))
     assert any("无权索引" in str(r) for r in results)
 
 
 def test_embedder_fingerprint_change_blocks_existing_library(tmp_path, main_module):
-    plugin = _make_plugin(tmp_path, [], main_module)
+    plugin = make_plugin(tmp_path, main_module, personas=[])
     db = plugin._db
     db.set_meta("embedder_fingerprint", "old_backend:512")
     vids = db.add_vectors(np.ones((1, 512), dtype="float32"))
@@ -176,7 +131,7 @@ def test_embedder_fingerprint_change_blocks_existing_library(tmp_path, main_modu
 
 
 def test_unknown_llm_tag_is_filtered_and_not_queued(tmp_path, main_module):
-    plugin = _make_plugin(tmp_path, [], main_module)
+    plugin = make_plugin(tmp_path, main_module, personas=[])
 
     async def _setup_and_run():
         await plugin._ensure_embedder()
@@ -189,7 +144,7 @@ def test_unknown_llm_tag_is_filtered_and_not_queued(tmp_path, main_module):
             def __init__(self, text):
                 self.completion_text = text
 
-        event = _make_fake_event(admin=True)
+        event = FakeEvent(admin=True)
         response = FakeResponse("hello %%unknown_tag%% %%happy%%")
         await plugin.on_llm_response(event, response)
         return event, response
@@ -200,7 +155,7 @@ def test_unknown_llm_tag_is_filtered_and_not_queued(tmp_path, main_module):
 
 
 def test_rebuild_indexing_failure_keeps_original_and_backup(tmp_path, monkeypatch, main_module):
-    plugin = _make_plugin(tmp_path, [], main_module)
+    plugin = make_plugin(tmp_path, main_module, personas=[])
     meme_dir = tmp_path / "memes"
     (meme_dir / "happy").mkdir(parents=True)
     Image.new("RGB", (4, 4), "red").save(meme_dir / "happy" / "a.png")
@@ -215,7 +170,7 @@ def test_rebuild_indexing_failure_keeps_original_and_backup(tmp_path, monkeypatc
 
     monkeypatch.setattr(main_module.MemeIndexer, "index_directory", _fail)
 
-    event = _make_fake_event(admin=True)
+    event = FakeEvent(admin=True)
     results = asyncio.run(_collect(plugin._cmd_rebuild(event, [])))
     assert any("重建失败" in str(r) for r in results)
     assert plugin._db.db_path.exists()
@@ -227,13 +182,13 @@ def test_rebuild_indexing_failure_keeps_original_and_backup(tmp_path, monkeypatc
 
 
 def test_rebuild_empty_library_succeeds_and_persists_empty_index(tmp_path, main_module):
-    plugin = _make_plugin(tmp_path, [], main_module)
+    plugin = make_plugin(tmp_path, main_module, personas=[])
     db = plugin._db
     vids = db.add_vectors(np.ones((1, 512), dtype="float32"))
     db.upsert_meme(str(tmp_path / "old.png"), "h", "happy", int(vids[0]))
     db.save_index()
 
-    event = _make_fake_event(admin=True)
+    event = FakeEvent(admin=True)
     results = asyncio.run(_collect(plugin._cmd_rebuild(event, [])))
     assert any("重建完成" in str(r) for r in results)
     assert plugin._db.total_count() == 0
@@ -243,7 +198,7 @@ def test_rebuild_empty_library_succeeds_and_persists_empty_index(tmp_path, main_
 
 
 def test_rebuild_preserves_runtime_state_and_logs(tmp_path, main_module):
-    plugin = _make_plugin(tmp_path, [], main_module)
+    plugin = make_plugin(tmp_path, main_module, personas=[])
     meme_dir = tmp_path / "memes"
     (meme_dir / "happy").mkdir(parents=True)
     image_path = meme_dir / "happy" / "a.png"
@@ -257,7 +212,7 @@ def test_rebuild_preserves_runtime_state_and_logs(tmp_path, main_module):
     db.log_search("hello", "happy", [mid], mid, 0.9)
     db.log_index_action("add", str(image_path), "success", "test")
 
-    event = _make_fake_event(admin=True)
+    event = FakeEvent(admin=True)
     results = asyncio.run(_collect(plugin._cmd_rebuild(event, [])))
     assert any("重建完成" in str(r) for r in results)
 
@@ -275,8 +230,8 @@ def test_rebuild_preserves_runtime_state_and_logs(tmp_path, main_module):
 
 
 def test_member_search_does_not_cold_load_embedder(tmp_path, main_module):
-    plugin = _make_plugin(tmp_path, [], main_module)
-    event = _make_fake_event(admin=False)
+    plugin = make_plugin(tmp_path, main_module, personas=[])
+    event = FakeEvent(admin=False)
     results = asyncio.run(_collect(plugin._dispatch_command(event, ["搜索", "开心"])))
     assert event.stopped
     assert plugin._embedder is None
@@ -300,7 +255,7 @@ async def _prepare_external_candidates(plugin, tag="happy", texts=("happy", "ang
 
 def test_external_sticker_rotates_within_tag(tmp_path, main_module):
     """回归：外部入口过去不写使用记录，同一 tag 在任意多条对话里永远返回同一张图。"""
-    plugin = _make_plugin(tmp_path, [], main_module)
+    plugin = make_plugin(tmp_path, main_module, personas=[])
 
     async def _run():
         candidates = await _prepare_external_candidates(plugin)
@@ -317,7 +272,7 @@ def test_external_sticker_rotates_within_tag(tmp_path, main_module):
 
 def test_external_sticker_dedup_can_be_disabled(tmp_path, main_module):
     """external_dedup=False 恢复旧契约：相同 tag 永远同一张图，且不写使用记录。"""
-    plugin = _make_plugin(tmp_path, [], main_module, external_dedup=False)
+    plugin = make_plugin(tmp_path, main_module, personas=[], config={"external_dedup": False})
 
     async def _run():
         candidates = await _prepare_external_candidates(plugin)

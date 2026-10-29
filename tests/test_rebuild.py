@@ -9,67 +9,15 @@ from __future__ import annotations
 
 import asyncio
 
-from PIL import Image
+from helpers import (
+    FakeEvent,
+    make_plugin,
+    run_async as _run,
+    texts as _texts,
+    write_png as _write_png,
+)
 
 BACKUP_SUFFIX = ".bak.v071"
-
-
-class FakeEvent:
-    def __init__(self, admin: bool = True):
-        self._admin = admin
-        self.sent = []
-
-    def is_admin(self) -> bool:
-        return self._admin
-
-    @staticmethod
-    def plain_result(text: str):
-        return ("plain", text)
-
-    async def send(self, result) -> None:
-        self.sent.append(result)
-
-
-def _make_plugin(tmp_path, main_module):
-    class FakeProviderManager:
-        def __init__(self):
-            self.personas = []
-
-    class FakeContext:
-        def __init__(self):
-            self.provider_manager = FakeProviderManager()
-
-    meme_dir = tmp_path / "memes"
-    meme_dir.mkdir(exist_ok=True)
-    plugin = main_module.VectorMemePlugin(
-        FakeContext(),
-        {
-            "data_dir": str(tmp_path / "data"),
-            "meme_dir": str(meme_dir),
-            "embedder_backend": "dummy",
-            "enable_prompt_injection": False,
-            "enable_vision_caption": False,
-            "enable_stochastic_selection": False,
-        },
-    )
-    return plugin, meme_dir
-
-
-def _write_png(path, color=(255, 0, 0)):
-    path.parent.mkdir(parents=True, exist_ok=True)
-    Image.new("RGB", (16, 16), color).save(path)
-    return path
-
-
-def _run(gen):
-    async def collect():
-        return [item async for item in gen]
-
-    return asyncio.run(collect())
-
-
-def _texts(out) -> list[str]:
-    return [item[1] if isinstance(item, tuple) else str(item) for item in out]
 
 
 def _backups(plugin) -> list:
@@ -89,7 +37,8 @@ class _BrokenIndexer:
 
 
 def test_cmd_index_adds_then_skips(tmp_path, main_module):
-    plugin, meme_dir = _make_plugin(tmp_path, main_module)
+    plugin = make_plugin(tmp_path, main_module)
+    meme_dir = plugin.meme_dir
     _write_png(meme_dir / "happy" / "a.png")
     _write_png(meme_dir / "sad" / "b.png", (0, 0, 255))
 
@@ -104,7 +53,8 @@ def test_cmd_index_adds_then_skips(tmp_path, main_module):
 
 
 def test_cmd_index_rejects_missing_and_outside_dirs(tmp_path, main_module):
-    plugin, meme_dir = _make_plugin(tmp_path, main_module)
+    plugin = make_plugin(tmp_path, main_module)
+    meme_dir = plugin.meme_dir
 
     missing = meme_dir / "nope"
     assert "目录不存在" in _texts(_run(plugin._cmd_index(FakeEvent(), [str(missing)])))[0]
@@ -119,7 +69,8 @@ def test_cmd_index_rejects_missing_and_outside_dirs(tmp_path, main_module):
 
 
 def test_rebuild_swaps_library_and_preserves_usage(tmp_path, main_module):
-    plugin, meme_dir = _make_plugin(tmp_path, main_module)
+    plugin = make_plugin(tmp_path, main_module)
+    meme_dir = plugin.meme_dir
     _write_png(meme_dir / "happy" / "a.png")
     _write_png(meme_dir / "happy" / "b.png", (0, 255, 0))
     _run(plugin._cmd_index(FakeEvent(), []))
@@ -143,7 +94,8 @@ def test_rebuild_swaps_library_and_preserves_usage(tmp_path, main_module):
 
 
 def test_rebuild_backup_failure_leaves_original_untouched(tmp_path, main_module, monkeypatch):
-    plugin, meme_dir = _make_plugin(tmp_path, main_module)
+    plugin = make_plugin(tmp_path, main_module)
+    meme_dir = plugin.meme_dir
     _write_png(meme_dir / "happy" / "a.png")
     _run(plugin._cmd_index(FakeEvent(), []))
     old_db = plugin._db
@@ -162,7 +114,8 @@ def test_rebuild_backup_failure_leaves_original_untouched(tmp_path, main_module,
 
 
 def test_rebuild_index_failure_rolls_back_and_keeps_backup(tmp_path, main_module, monkeypatch):
-    plugin, meme_dir = _make_plugin(tmp_path, main_module)
+    plugin = make_plugin(tmp_path, main_module)
+    meme_dir = plugin.meme_dir
     _write_png(meme_dir / "happy" / "a.png")
     _run(plugin._cmd_index(FakeEvent(), []))
     old_db = plugin._db
@@ -179,7 +132,8 @@ def test_rebuild_index_failure_rolls_back_and_keeps_backup(tmp_path, main_module
 
 
 def test_rebuild_swap_failure_restores_backup(tmp_path, main_module, monkeypatch):
-    plugin, meme_dir = _make_plugin(tmp_path, main_module)
+    plugin = make_plugin(tmp_path, main_module)
+    meme_dir = plugin.meme_dir
     _write_png(meme_dir / "happy" / "a.png")
     _run(plugin._cmd_index(FakeEvent(), []))
     old_db = plugin._db
@@ -203,7 +157,7 @@ def test_rebuild_swap_failure_restores_backup(tmp_path, main_module, monkeypatch
 
 
 def test_progress_reporter_throttles_and_reports_completion(tmp_path, main_module):
-    plugin, _ = _make_plugin(tmp_path, main_module)
+    plugin = make_plugin(tmp_path, main_module)
 
     async def scenario():
         event = FakeEvent()

@@ -9,35 +9,7 @@ from __future__ import annotations
 
 import asyncio
 
-
-# ---------- 公共构造 ----------
-
-
-def _make_plugin(tmp_path, main_module, **extra_config):
-    class FakeProviderManager:
-        def __init__(self):
-            self.personas = []
-
-    class FakeContext:
-        def __init__(self):
-            self.provider_manager = FakeProviderManager()
-            self.sent_messages = []
-
-        async def send_message(self, umo, chain):
-            self.sent_messages.append((umo, chain))
-
-    meme_dir = tmp_path / "memes"
-    meme_dir.mkdir(exist_ok=True)
-    config = {
-        "data_dir": str(tmp_path / "data"),
-        "meme_dir": str(meme_dir),
-        "embedder_backend": "dummy",
-        "enable_prompt_injection": False,
-        # 关掉随机采样，断言才可复现
-        "enable_stochastic_selection": False,
-    }
-    config.update(extra_config)
-    return main_module.VectorMemePlugin(FakeContext(), config)
+from helpers import make_plugin
 
 
 async def _seed(plugin, tag="happy", texts=("happy", "joy")):
@@ -100,7 +72,7 @@ def _plain_texts(chain):
 
 
 def test_decorating_mixes_image_into_chain(tmp_path, main_module):
-    plugin = _make_plugin(tmp_path, main_module)
+    plugin = make_plugin(tmp_path, main_module)
 
     async def _run():
         paths = await _seed(plugin)
@@ -118,7 +90,7 @@ def test_decorating_mixes_image_into_chain(tmp_path, main_module):
 
 def test_decorating_streaming_sends_images_directly(tmp_path, main_module):
     """流式收尾：图片不能追加进 chain（不会被发送），必须直接补发。"""
-    plugin = _make_plugin(tmp_path, main_module)
+    plugin = make_plugin(tmp_path, main_module)
 
     async def _run():
         paths = await _seed(plugin)
@@ -142,7 +114,7 @@ def test_decorating_streaming_sends_images_directly(tmp_path, main_module):
 
 
 def test_decorating_non_mixed_defers_images_to_after_send(tmp_path, main_module):
-    plugin = _make_plugin(tmp_path, main_module, enable_mixed_message=False)
+    plugin = make_plugin(tmp_path, main_module, config={"enable_mixed_message": False})
 
     async def _run():
         paths = await _seed(plugin)
@@ -161,7 +133,7 @@ def test_decorating_non_mixed_defers_images_to_after_send(tmp_path, main_module)
 
 def test_decorating_cleans_placeholders_without_tags(tmp_path, main_module):
     """没有待发送 tag 时也要清理残留占位符，并且不选图。"""
-    plugin = _make_plugin(tmp_path, main_module)
+    plugin = make_plugin(tmp_path, main_module)
 
     async def _run():
         result = FakeResult([main_module.Plain("hi %%happy%%")])
@@ -176,7 +148,7 @@ def test_decorating_cleans_placeholders_without_tags(tmp_path, main_module):
 
 
 def test_decorating_skips_when_retriever_not_ready(tmp_path, main_module, monkeypatch):
-    plugin = _make_plugin(tmp_path, main_module)
+    plugin = make_plugin(tmp_path, main_module)
 
     async def _not_ready():
         return None
@@ -193,7 +165,7 @@ def test_decorating_skips_when_retriever_not_ready(tmp_path, main_module, monkey
 
 def test_decorating_supports_message_chain_result(tmp_path, main_module):
     """result.chain 可能是 MessageChain，需要原地替换其内部 chain。"""
-    plugin = _make_plugin(tmp_path, main_module)
+    plugin = make_plugin(tmp_path, main_module)
 
     async def _run():
         paths = await _seed(plugin)
@@ -231,7 +203,7 @@ def _pending_event(images, send_impl=None, umo="umo://test"):
 
 
 def test_after_send_uses_event_send(tmp_path, main_module):
-    plugin = _make_plugin(tmp_path, main_module)
+    plugin = make_plugin(tmp_path, main_module)
     sent = []
 
     async def _send(chain):
@@ -246,7 +218,7 @@ def test_after_send_uses_event_send(tmp_path, main_module):
 
 
 def test_after_send_falls_back_to_context(tmp_path, main_module):
-    plugin = _make_plugin(tmp_path, main_module)
+    plugin = make_plugin(tmp_path, main_module)
 
     async def _send(_chain):
         raise RuntimeError("platform send failed")
@@ -260,7 +232,7 @@ def test_after_send_falls_back_to_context(tmp_path, main_module):
 
 
 def test_after_send_without_umo_does_not_raise(tmp_path, main_module):
-    plugin = _make_plugin(tmp_path, main_module)
+    plugin = make_plugin(tmp_path, main_module)
 
     class Ev:
         def __init__(self):
@@ -278,7 +250,7 @@ def test_after_send_without_umo_does_not_raise(tmp_path, main_module):
 
 
 def test_after_send_noop_without_pending(tmp_path, main_module):
-    plugin = _make_plugin(tmp_path, main_module)
+    plugin = make_plugin(tmp_path, main_module)
     ev = _pending_event([])
     asyncio.run(plugin.after_message_sent(ev))
     assert plugin.context.sent_messages == []
@@ -288,7 +260,7 @@ def test_after_send_noop_without_pending(tmp_path, main_module):
 
 
 def test_external_rejects_empty_and_unknown_without_loading(tmp_path, main_module):
-    plugin = _make_plugin(tmp_path, main_module)
+    plugin = make_plugin(tmp_path, main_module)
 
     async def _run():
         empty = await plugin.search_sticker_for_external("")
@@ -303,7 +275,7 @@ def test_external_rejects_empty_and_unknown_without_loading(tmp_path, main_modul
 
 def test_external_accepts_sticker_placeholder(tmp_path, main_module):
     """<sticker>%%happy%%</sticker> 的混合写法要能归一化。"""
-    plugin = _make_plugin(tmp_path, main_module)
+    plugin = make_plugin(tmp_path, main_module)
 
     async def _run():
         paths = await _seed(plugin)
@@ -315,7 +287,7 @@ def test_external_accepts_sticker_placeholder(tmp_path, main_module):
 
 
 def test_external_returns_none_when_not_ready(tmp_path, main_module, monkeypatch):
-    plugin = _make_plugin(tmp_path, main_module)
+    plugin = make_plugin(tmp_path, main_module)
 
     async def _not_ready():
         return None
@@ -326,7 +298,7 @@ def test_external_returns_none_when_not_ready(tmp_path, main_module, monkeypatch
 
 def test_external_never_raises_on_search_error(tmp_path, main_module, monkeypatch):
     """契约：检索内部炸掉也只返回 None，不向调用方抛异常。"""
-    plugin = _make_plugin(tmp_path, main_module)
+    plugin = make_plugin(tmp_path, main_module)
 
     async def _seed_then_break():
         paths = await _seed(plugin)

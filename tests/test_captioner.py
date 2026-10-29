@@ -14,6 +14,8 @@ from core.captioner import (
     CaptionGenerator,
     enrich_meme_captions,
 )
+from core.database import MemeDatabase
+from core.embedder import DummyEmbedder
 
 
 class FakeResponse:
@@ -277,3 +279,27 @@ def test_enrich_clamps_limit_and_reports_progress():
 
     assert db.limit == 0
     assert progress == [(1, 2), (2, 2)]
+
+
+def test_enrich_persists_captions_into_real_database(tmp_path):
+    """真 MemeDatabase + DummyEmbedder：确认 caption 与向量真的落库。"""
+    embedder = DummyEmbedder(dim=8)
+    db = MemeDatabase(tmp_path / "memes.db", tmp_path / "memes.faiss", dim=8)
+    ids = []
+    for i, tag in enumerate(("happy", "sad")):
+        path = tmp_path / f"{tag}.png"
+        path.write_bytes(b"fake")
+        db.upsert_meme(str(path), f"h{i}", tag, -1, file_name=path.name)
+        ids.append(db.get_meme_by_path(str(path))["id"])
+
+    class Ctx:
+        async def llm_generate(self, **kwargs):
+            return FakeResponse(json.dumps({"caption": "开心", "en_keywords": "happy"}))
+
+    result = _run(enrich_meme_captions(db, embedder, CaptionGenerator(Ctx(), "vl")))
+
+    assert result == {"total": 2, "ok": 2, "failed": 0}
+    rows = [db.get_meme(mid) for mid in ids]
+    assert [row["caption"] for row in rows] == ["开心 happy", "开心 happy"]
+    assert all(0 <= row["caption_vector_id"] < 2 for row in rows)
+    assert len(db.list_caption_vector_ids()) == 2

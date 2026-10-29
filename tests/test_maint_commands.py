@@ -4,72 +4,20 @@
 """
 from __future__ import annotations
 
-import asyncio
-
 import numpy as np
-from PIL import Image
 
-
-class FakeEvent:
-    def __init__(self, admin: bool = True):
-        self._admin = admin
-        self.sent = []
-
-    def is_admin(self) -> bool:
-        return self._admin
-
-    @staticmethod
-    def plain_result(text: str):
-        return ("plain", text)
-
-    async def send(self, result) -> None:
-        self.sent.append(result)
-
-
-def _make_plugin(tmp_path, main_module):
-    class FakeProviderManager:
-        def __init__(self):
-            self.personas = []
-
-    class FakeContext:
-        def __init__(self):
-            self.provider_manager = FakeProviderManager()
-
-    meme_dir = tmp_path / "memes"
-    meme_dir.mkdir(exist_ok=True)
-    return main_module.VectorMemePlugin(
-        FakeContext(),
-        {
-            "data_dir": str(tmp_path / "data"),
-            "meme_dir": str(meme_dir),
-            "embedder_backend": "dummy",
-            "enable_prompt_injection": False,
-            "enable_vision_caption": False,
-            "enable_stochastic_selection": False,
-        },
-    )
-
-
-def _write_png(path, color=(255, 0, 0)):
-    path.parent.mkdir(parents=True, exist_ok=True)
-    Image.new("RGB", (16, 16), color).save(path)
-    return path
-
-
-def _run(gen):
-    async def collect():
-        return [item async for item in gen]
-
-    return asyncio.run(collect())
-
-
-def _texts(out) -> list[str]:
-    return [item[1] if isinstance(item, tuple) else str(item) for item in out]
+from helpers import (
+    FakeEvent,
+    make_plugin,
+    run_async as _run,
+    texts as _texts,
+    write_png as _write_png,
+)
 
 
 def _seed_duplicate(*, tmp_path, main_module, count=3, tag="happy"):
     """在库里放 count 条互相完全相同的向量（余弦 1.0），模拟近重复变体。"""
-    plugin = _make_plugin(tmp_path, main_module)
+    plugin = make_plugin(tmp_path, main_module)
     db = plugin._db
     base = np.ones(db.dim, dtype="float32")
     vids = db.add_vectors(np.stack([base] * count))
@@ -119,7 +67,7 @@ def test_dedup_apply_then_undo_roundtrip(tmp_path, main_module):
 
 
 def test_dedup_empty_db_short_circuits(tmp_path, main_module):
-    plugin = _make_plugin(tmp_path, main_module)
+    plugin = make_plugin(tmp_path, main_module)
     texts = _texts(_run(plugin._cmd_dedup(FakeEvent(), [])))
     assert "库为空" in texts[0]
     assert plugin._embedder is None
@@ -135,7 +83,7 @@ def test_dedup_accepts_custom_threshold(tmp_path, main_module):
 
 
 def test_repair_removes_missing_files_and_compacts_orphans(tmp_path, main_module):
-    plugin = _make_plugin(tmp_path, main_module)
+    plugin = make_plugin(tmp_path, main_module)
     meme_dir = plugin.meme_dir
     for tag, name in (("happy", "a"), ("happy", "b"), ("sad", "c")):
         _write_png(meme_dir / tag / f"{name}.png")
@@ -157,7 +105,7 @@ def test_repair_removes_missing_files_and_compacts_orphans(tmp_path, main_module
 
 
 def test_repair_without_orphans_reports_no_compaction(tmp_path, main_module):
-    plugin = _make_plugin(tmp_path, main_module)
+    plugin = make_plugin(tmp_path, main_module)
     _write_png(plugin.meme_dir / "happy" / "a.png")
     _run(plugin._cmd_index(FakeEvent(), []))
 
@@ -167,7 +115,7 @@ def test_repair_without_orphans_reports_no_compaction(tmp_path, main_module):
 
 
 def test_repair_refuses_when_index_corrupted(tmp_path, main_module):
-    plugin = _make_plugin(tmp_path, main_module)
+    plugin = make_plugin(tmp_path, main_module)
     _write_png(plugin.meme_dir / "happy" / "a.png")
     _run(plugin._cmd_index(FakeEvent(), []))
     plugin._db.index_corrupted = True
