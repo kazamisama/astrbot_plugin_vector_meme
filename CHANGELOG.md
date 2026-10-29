@@ -8,7 +8,9 @@
 - `tests/test_embedder_setup.py`：后端参数解析、指纹/维度不兼容、空库按新维度建库、env 覆盖恢复、caption 导入导出边界
 - `tests/test_hook_edges.py`：LLM 钩子的空响应/链回退/非法 tag/异常吞掉、查询向量三种来源、图片与流式发送失败隔离、外部入口非法/未知/无命中/随机/写记录失败
 - `tests/test_retriever.py` 补充 prototype/KNN 分类、加权采样、pick_multiple 与 DualRetriever 的 caption 关闭/空 caption/无 rerank 分支
-- 测试总数 147 → 188，覆盖率 71% → 89%（main.py 52% → 84%，retriever 80% → 95%，retriever_dual 84% → 92%，indexer 74% → 98%）
+- `tests/test_command_edges.py`：命令入口的错误分支与边界输入（文本入口、未初始化 DB、搜索/解释空结果与扩展 tag、评测混淆、重标注/删除、tag schema 缺失、自动分类 apply 跳过、caption 错误、准备库时 close 失败）
+- `tests/test_remaining_edges.py`：初始化配置拍平与默认 data_dir、发送失败兜底、索引/重建/修复守卫、去重阈值解析、legacy/重复/限量 tag、查询向量边界、装饰与补发外层异常、terminate 清理异常、备份还原失败
+- 测试总数 147 → 224，覆盖率 71% → 96%（main.py 52% → 98%，retriever 80% → 99%，retriever_dual 84% → 97%，indexer 74% → 98%）
 
 ### 变更
 - CI 覆盖率门禁从 55% 提升到 80%

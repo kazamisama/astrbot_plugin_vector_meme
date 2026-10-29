@@ -278,6 +278,91 @@ def test_classify_vector_and_classify_meme_branches(tmp_path):
     assert retriever.classify_meme(no_vector) == []
 
 
+def test_retriever_helper_guards_and_power_branch(tmp_path):
+    from core.retriever import MemeHit
+
+    db = MemeDatabase(tmp_path / "m.db", tmp_path / "m.faiss", dim=16)
+    emb = DummyEmbedder(16, seed=5)
+    retriever = MemeRetriever(db, emb, candidate_pool_size=2, random_jitter=0.0)
+
+    assert retriever._search_meme_scores(np.ones(16), [], 3) == []
+    assert retriever._load_meme_rows([]) == {}
+    assert retriever._build_hits([(1, 0.5)], {}) == []
+    retriever._log_search("q", None, [])
+    assert retriever._vectors_by_meme_id([]) == {}
+    assert retriever._diversify([], {}) == []
+    assert retriever._rerank([]) == []
+
+    vids = db.add_vectors(np.stack([emb.embed_text("a")]))
+    db.upsert_meme(str(tmp_path / "a.png"), "a", "happy", int(vids[0]))
+    assert retriever._related_tags(np.ones(16), None, 0) == []
+    assert retriever._related_tags(np.zeros(16), None, 2) == []
+
+    db.active_vector_rows = lambda: (
+        [{"tag": "zero"}],
+        np.zeros((1, 16), dtype="float32"),
+    )
+    assert retriever._related_tags(np.ones(16), None, 2) == []
+
+    h1 = MemeHit(1, "a.png", "x", 0.9)
+    h2 = MemeHit(2, "b.png", "x", 0.8)
+    diversified = retriever._diversify([h1, h2], {1: np.ones(16, dtype="float32")})
+    assert [h.meme_id for h in diversified] == [1, 2]
+
+    retriever.expand_small_pool = True
+    retriever._related_tags = lambda *args, **kwargs: [("other", 0.5)]
+    expanded, added = retriever._expand_candidates(
+        np.ones(16),
+        "tiny",
+        [(1, 10)],
+        lambda tag: [(1, 10), (2, 11)] if tag == "other" else [],
+    )
+    assert expanded == [(1, 10), (2, 11)]
+    assert added == ["other"]
+
+    retriever.weighted_sampling_power = 2.0
+    assert retriever._weighted_pick(
+        [MemeHit(1, "a.png", "x", 0.2), MemeHit(2, "b.png", "x", 0.9)]
+    ) is not None
+    assert retriever.pick_multiple("a", tag="happy", n=1, stochastic=True)
+
+
+def test_dual_caption_candidate_and_empty_score_edges(tmp_path):
+    db = MemeDatabase(tmp_path / "m.db", tmp_path / "m.faiss", dim=16)
+    emb = DummyEmbedder(16, seed=77)
+    cap_ids = db.add_vectors(np.stack([emb.embed_text("smiling")]))
+    mid = db.upsert_meme(str(tmp_path / "a.png"), "a", "happy", -1)
+    db.set_meme_caption(mid, "smiling", int(cap_ids[0]))
+    retriever = DualRetriever(
+        db, emb, caption_weight=1.0, candidate_pool_size=2, random_jitter=0.0
+    )
+    assert retriever._caption_candidates(None) == [(int(cap_ids[0]), mid)]
+    retriever._search_caption_path = lambda *args, **kwargs: {}
+    result = retriever.retrieve("smiling", tag="happy", topk=1)
+    assert result.hits == []
+
+
+def test_dual_fusion_without_rerank(tmp_path):
+    db = MemeDatabase(tmp_path / "m.db", tmp_path / "m.faiss", dim=16)
+    emb = DummyEmbedder(16, seed=79)
+    img_ids = db.add_vectors(
+        np.stack([emb.embed_text("cat"), emb.embed_text("dog")])
+    )
+    m1 = db.upsert_meme(str(tmp_path / "a.png"), "a", "happy", int(img_ids[0]))
+    m2 = db.upsert_meme(str(tmp_path / "b.png"), "b", "happy", int(img_ids[1]))
+    cap_ids = db.add_vectors(
+        np.stack([emb.embed_text("smiling cat"), emb.embed_text("sleepy dog")])
+    )
+    db.set_meme_caption(m1, "smiling cat", int(cap_ids[0]))
+    db.set_meme_caption(m2, "sleepy dog", int(cap_ids[1]))
+    retriever = DualRetriever(
+        db, emb, caption_weight=0.7, candidate_pool_size=2, random_jitter=0.0
+    )
+    result = retriever.retrieve("smiling cat", tag="happy", topk=2, rerank=False)
+    assert {hit.meme_id for hit in result.hits} == {m1, m2}
+    assert result.hits[0].meme_id == m1
+
+
 def test_pick_accepts_query_vector(tmp_path):
     """外部传入 query_vector 时跳过 embed_text，语义由调用方控制。"""
     db = MemeDatabase(tmp_path / "m.db", tmp_path / "m.faiss", dim=16)
